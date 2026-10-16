@@ -22,6 +22,9 @@ const serverEnv = {
   DATABASE_DRIVER: "pg",
   ADMIN_API_KEY: process.env.ADMIN_API_KEY ?? "test-admin-key",
   GROUP_COOKIE_SECRET: process.env.GROUP_COOKIE_SECRET ?? "test-cookie-secret",
+  // The suite drives login and the admin API from one IP against a shared
+  // server, which would trip the rate limiters; turn them off for tests.
+  DISABLE_RATE_LIMITS: "1",
 };
 
 // Which browser projects to run. By default the whole matrix runs (Chrome,

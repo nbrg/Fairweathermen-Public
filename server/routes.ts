@@ -50,7 +50,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // gate all /api routes that aren't part of the login flow or the admin
   // surface (which has its own API key auth).
   const { groupContext, requireGroup, setUserCookie, clearUserCookie, userGameEnabled } = await import("./groupAuth");
+  const { loginLimiter, adminLimiter } = await import("./rateLimits");
   app.use(groupContext);
+
+  // Throttle brute-force attempts against the admin API key across the whole
+  // admin surface (all admin endpoints live under /api/admin). The login
+  // endpoint gets its own limiter where it's defined below.
+  app.use("/api/admin", adminLimiter);
 
   app.use("/api", (req, res, next) => {
     // Public endpoints — the auth surface itself can't be auth-gated.
@@ -171,7 +177,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // list of groups they can switch between. The endpoint path is kept for
   // backwards-compat with the client, but the code is now a per-person code
   // rather than a group slug.
-  app.post("/api/group/login", async (req, res) => {
+  app.post("/api/group/login", loginLimiter, async (req, res) => {
     try {
       const code = String(req.body?.code ?? "").trim().toLowerCase();
       if (!code) return res.status(400).json({ error: "Code required" });
