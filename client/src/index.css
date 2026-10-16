@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Stop the browser from auto-scrolling to keep an "anchor" element in view as
+   async content (live scores, tables) loads in — on mobile this quietly nudged
+   the page down after login, hiding the navbar. We always reset to the top
+   ourselves (see App.tsx). */
+html,
+body {
+  overflow-anchor: none;
+}
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 20 14.3% 4.1%;
+  --muted: 60 4.8% 95.9%;
+  --muted-foreground: 25 5.3% 44.7%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 20 14.3% 4.1%;
+  --card: 0 0% 100%;
+  --card-foreground: 20 14.3% 4.1%;
+  --border: 20 5.9% 90%;
+  --input: 20 5.9% 90%;
+  --primary: 273 68% 12%; /* Premier League purple */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 144 72% 50%; /* Premier League green */
+  --secondary-foreground: 273 68% 12%;
+  --accent: 273 39% 45%; /* Lighter purple */
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 60 9.1% 97.8%;
+  --ring: 20 14.3% 4.1%;
+  --radius: 0.5rem;
+  --chart-1: 273 68% 12%;
+  --chart-2: 144 72% 50%;
+  --chart-3: 273 39% 45%;
+  --chart-4: 0 84.2% 60.2%;
+  --chart-5: 60 4.8% 95.9%;
+  
+  /* Status colors */
+  --status-correct: 142 71% 45%;
+  --status-partial: 35 92% 51%;
+  --status-incorrect: 0 84% 60%;
+}
+
+.dark {
+  --background: 240 10% 3.9%;
+  --foreground: 0 0% 98%;
+  --muted: 240 3.7% 15.9%;
+  --muted-foreground: 240 5% 64.9%;
+  --popover: 240 10% 3.9%;
+  --popover-foreground: 0 0% 98%;
+  --card: 240 10% 3.9%;
+  --card-foreground: 0 0% 98%;
+  --border: 240 3.7% 15.9%;
+  --input: 240 3.7% 15.9%;
+  --primary: 273 68% 12%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 144 72% 50%;
+  --secondary-foreground: 273 68% 12%;
+  --accent: 273 39% 45%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 0 0% 98%;
+  --ring: 240 4.9% 83.9%;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+}
+
+/* Hide number input arrows to prevent centering issues */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Double circle effect for eagles */
+.eagle-double-circle {
+  outline: 2px solid #b91c1c;
+  outline-offset: 2px;
+}
+
+/* Double square effect for double bogeys or worse */
+.double-bogey-double-square {
+  outline: 2px solid #f97316;
+  outline-offset: 2px;
+}
+
+/* Status colors */
+.bg-status-correct {
+  @apply bg-[#10B981];
+}
+
+.bg-status-partial {
+  @apply bg-[#F59E0B];
+}
+
+.bg-status-incorrect {
+  @apply bg-[#EF4444];
+}
+
+.text-status-correct {
+  @apply text-[#10B981];
+}
+
+.text-status-partial {
+  @apply text-[#F59E0B];
+}
+
+.text-status-incorrect {
+  @apply text-[#EF4444];
+}
+
+.border-status-correct {
+  @apply border-[#10B981];
+}
+
+.border-status-partial {
+  @apply border-[#F59E0B];
+}
+
+.border-status-incorrect {
+  @apply border-[#EF4444];
+}
+
+/* Score circle styles for consistent display on all devices */
+.score-circle {
+  width: 2.5rem !important;
+  height: 2.5rem !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 9999px !important;
+  color: white !important;
+  font-weight: 700 !important;
+  font-size: 1.25rem !important;
+  margin-right: 0.75rem !important;
+  text-align: center !important;
+  line-height: 1 !important;
+  -webkit-text-size-adjust: 100% !important;
+  font-family: -apple-system, system-ui, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+.score-circle-3 {
+  background-color: #22c55e !important;
+}
+
+.score-circle-1 {
+  background-color: #f97316 !important;
+}

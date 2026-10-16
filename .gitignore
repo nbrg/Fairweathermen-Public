@@ -1,0 +1,24 @@
+node_modules
+dist
+.DS_Store
+server/public
+vite.config.ts.*
+*.tar.gz
+.env
+.env.local
+.env.*.local
+
+# Playwright
+test-results
+playwright-report
+blob-report
+.playwright
+/playwright/.cache
+
+# Sidecar state written by scripts/wcSimulateLiveDemo.ts so --reset can undo it
+.wc-demo-state.json
+# Sidecar state written by the endgame preview scripts (scripts/wcEndgameSim.ts)
+.wc-endgame-state.json
+# Local snapshot from scripts/simulate*.ts (dev testing)
+scripts/.sim-backup-gw1.json
+scripts/.sim-progress-backup-gw*.json
