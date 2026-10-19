@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import crypto from "crypto";
 import { storage } from "./storage";
 import { runScraper } from "./scraper";
 import { insertTeamSchema, insertMatchSchema, insertPredictionSchema, insertGolfTournamentSchema, insertGolfScoreSchema, insertGolfPrizeWinnerSchema, REMINDER_LEAD_PRESETS_MINUTES } from "@shared/schema";
@@ -65,7 +66,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       req.path === "/group/logout" ||
       req.path === "/group/me" ||
       req.path === "/group/switch" ||
-      req.path === "/push/vapid-public-key"
+      req.path === "/push/vapid-public-key" ||
+      // Self-service group creation + invites are pre-login by nature.
+      req.path === "/group/create" ||
+      req.path.startsWith("/group/invite/") ||
+      req.path.startsWith("/group/join/")
     ) {
       return next();
     }
@@ -146,6 +151,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       (defaultGroup && sortedRows.find((r) => r.groupId === defaultGroup.id)) ||
       sortedRows[0];
     const activeGroup = grps.find((g) => g.id === activeRow.groupId)!;
+    const { resolveGroupRulesForGroup } = await import("./groupRules");
     return {
       activeRow,
       payload: {
@@ -153,6 +159,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         slug: activeGroup.slug,
         name: activeGroup.name,
         enabledGames: effectiveGames(activeGroup.enabledGames, activeRow.enabledGames),
+        // The active group's resolved rules (defaults merged, legacy columns
+        // bridged), so the client scores/labels using this group's settings.
+        rules: resolveGroupRulesForGroup(activeGroup),
+        // True when the logged-in person created this group (is its admin), so
+        // the client can show the owner-only group settings. Null ownerUserId
+        // (the original hand-seeded groups) means nobody is the self-service
+        // admin, so this is false for everyone there.
+        isOwner: activeGroup.ownerUserId != null && activeGroup.ownerUserId === activeRow.id,
         user: { id: activeRow.id, username: activeRow.username },
         // Each group the person belongs to, with the games they can see there
         // (their per-group override applied). Drives the header's cross-group
@@ -195,6 +209,279 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/group/logout", (_req, res) => {
     clearUserCookie(res);
     res.json({ ok: true });
+  });
+
+  // ---- Self-service group creation / invites ----
+
+  // Games a self-service group may run. Golf depends on hand-seeded courses +
+  // admin setup, so a random new group can only pick the two self-contained
+  // games: Last Man Standing and the Prediction League ("Lawro").
+  const SELF_SERVE_GAMES = ["lms", "predictions"] as const;
+
+  function slugifyName(name: string): string {
+    const base = name
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 32);
+    return base || "group";
+  }
+
+  async function uniqueGroupSlug(name: string): Promise<string> {
+    const { db } = await import("./db");
+    const { groups } = await import("@shared/schema");
+    const { eq } = await import("drizzle-orm");
+    const base = slugifyName(name);
+    for (let attempt = 0; attempt < 25; attempt++) {
+      const suffix = crypto.randomBytes(3).toString("hex");
+      const slug = `${base}-${suffix}`;
+      const [existing] = await db.select({ id: groups.id }).from(groups).where(eq(groups.slug, slug));
+      if (!existing) return slug;
+    }
+    throw new Error("Could not generate a unique group slug");
+  }
+
+  function newInviteToken(): string {
+    return crypto.randomBytes(16).toString("base64url");
+  }
+
+  // True when the logged-in person is the admin (owner) of their active group.
+  async function isActiveGroupOwner(req: any): Promise<boolean> {
+    if (!req.userId || !req.groupId) return false;
+    const { db } = await import("./db");
+    const { groups } = await import("@shared/schema");
+    const { eq } = await import("drizzle-orm");
+    const [group] = await db
+      .select({ ownerUserId: groups.ownerUserId })
+      .from(groups)
+      .where(eq(groups.id, req.groupId));
+    return !!group && group.ownerUserId != null && group.ownerUserId === req.userId;
+  }
+
+  // POST /api/group/create — public. Anyone can create a group. Body:
+  //   { groupName, adminName, games: string[] }
+  // Creates the group, makes the caller its first player AND its admin (owner),
+  // mints an invite token, logs the caller in, and returns their login code and
+  // the invite link to share.
+  app.post("/api/group/create", loginLimiter, async (req, res) => {
+    try {
+      const groupName = String(req.body?.groupName ?? "").trim();
+      const adminName = String(req.body?.adminName ?? "").trim();
+      const requestedGames: unknown = req.body?.games;
+
+      if (groupName.length < 2 || groupName.length > 60) {
+        return res.status(400).json({ error: "Group name must be 2–60 characters" });
+      }
+      if (adminName.length < 1 || adminName.length > 40) {
+        return res.status(400).json({ error: "Your name must be 1–40 characters" });
+      }
+      const games = Array.isArray(requestedGames)
+        ? SELF_SERVE_GAMES.filter((g) => requestedGames.includes(g))
+        : [];
+      if (games.length === 0) {
+        return res.status(400).json({ error: "Pick at least one game (Last Man Standing or Lawro)" });
+      }
+
+      const { db } = await import("./db");
+      const { groups, users } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const { resolveLoginCodeForUsername } = await import("./loginCodes");
+
+      const slug = await uniqueGroupSlug(groupName);
+      const inviteToken = newInviteToken();
+
+      const [group] = await db
+        .insert(groups)
+        .values({ slug, name: groupName, enabledGames: games as string[], inviteToken })
+        .returning();
+
+      const [adminRow] = await db
+        .insert(users)
+        .values({
+          username: adminName,
+          password: "password",
+          groupId: group.id,
+          loginCode: await resolveLoginCodeForUsername(adminName),
+        })
+        .returning();
+      await db.update(groups).set({ ownerUserId: adminRow.id }).where(eq(groups.id, group.id));
+
+      const session = await buildSession(adminRow.loginCode!, group.id);
+      if (session) setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
+
+      const inviteUrl = `${req.protocol}://${req.get("host")}/join/${inviteToken}`;
+      res.json({
+        ok: true,
+        loginCode: adminRow.loginCode,
+        inviteToken,
+        inviteUrl,
+        group: session?.payload ?? null,
+      });
+    } catch (err: any) {
+      console.error("[/api/group/create] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to create group" });
+    }
+  });
+
+  // GET /api/group/invite/:token — public. Describes the group behind an invite
+  // link so the join page can greet the player. 404 for an unknown token.
+  app.get("/api/group/invite/:token", async (req, res) => {
+    try {
+      const token = String(req.params.token ?? "");
+      if (!token) return res.status(400).json({ error: "Missing token" });
+      const { db } = await import("./db");
+      const { groups } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const [group] = await db
+        .select({ name: groups.name, enabledGames: groups.enabledGames })
+        .from(groups)
+        .where(eq(groups.inviteToken, token));
+      if (!group) return res.status(404).json({ error: "This invite link is invalid or has expired" });
+      res.json({ name: group.name, games: group.enabledGames });
+    } catch (err: any) {
+      console.error("[/api/group/invite GET] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to load invite" });
+    }
+  });
+
+  // POST /api/group/join/:token — public. A player joins a group via its invite
+  // link. Body: { name }. Creates their player row + login code (or reuses an
+  // existing row/code), enrols them into any active LMS competition, logs them
+  // in, and returns their login code.
+  app.post("/api/group/join/:token", loginLimiter, async (req, res) => {
+    try {
+      const token = String(req.params.token ?? "");
+      const name = String(req.body?.name ?? "").trim();
+      if (!token) return res.status(400).json({ error: "Missing token" });
+      if (name.length < 1 || name.length > 40) {
+        return res.status(400).json({ error: "Your name must be 1–40 characters" });
+      }
+
+      const { db } = await import("./db");
+      const { groups, users } = await import("@shared/schema");
+      const { and, eq } = await import("drizzle-orm");
+      const { resolveLoginCodeForUsername } = await import("./loginCodes");
+
+      const [group] = await db.select().from(groups).where(eq(groups.inviteToken, token));
+      if (!group) return res.status(404).json({ error: "This invite link is invalid or has expired" });
+
+      const [existing] = await db
+        .select()
+        .from(users)
+        .where(and(eq(users.username, name), eq(users.groupId, group.id)));
+      let player = existing;
+      if (!player) {
+        const [row] = await db
+          .insert(users)
+          .values({
+            username: name,
+            password: "password",
+            groupId: group.id,
+            loginCode: await resolveLoginCodeForUsername(name),
+          })
+          .returning();
+        player = row;
+      }
+
+      const competition = await storage.getCurrentLmsCompetition(group.id);
+      if (competition) {
+        const participants = await storage.getLmsParticipantsByCompetition(competition.id);
+        if (!participants.some((p) => p.userId === player.id)) {
+          await storage.createLmsParticipant({
+            competitionId: competition.id,
+            userId: player.id,
+            isActive: "true",
+          } as any);
+        }
+      }
+
+      const session = await buildSession(player.loginCode!, group.id);
+      if (session) setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
+      res.json({ ok: true, loginCode: player.loginCode, group: session?.payload ?? null });
+    } catch (err: any) {
+      console.error("[/api/group/join POST] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to join group" });
+    }
+  });
+
+  // GET /api/group/rules — the active group's resolved rules + whether the
+  // caller may edit them (is the owner). Any logged-in member can read.
+  app.get("/api/group/rules", requireGroup, async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { groups } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const { resolveGroupRulesForGroup } = await import("./groupRules");
+      const [group] = await db
+        .select({
+          rules: groups.rules,
+          buyIn: groups.buyIn,
+          lmsAllOutRule: groups.lmsAllOutRule,
+          enabledGames: groups.enabledGames,
+          inviteToken: groups.inviteToken,
+        })
+        .from(groups)
+        .where(eq(groups.id, req.groupId!));
+      if (!group) return res.status(404).json({ error: "No such group" });
+      const isOwner = await isActiveGroupOwner(req);
+      res.json({
+        rules: resolveGroupRulesForGroup(group),
+        enabledGames: group.enabledGames,
+        isOwner,
+        // Only the admin needs the invite link (to share it).
+        inviteToken: isOwner ? group.inviteToken : null,
+      });
+    } catch (err: any) {
+      console.error("[/api/group/rules GET] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to load rules" });
+    }
+  });
+
+  // PUT /api/group/rules — update the active group's rules. Owner only. Body is
+  // a (partial) GroupRules; it's merged onto the current rules and clamped to
+  // sane bounds by resolveGroupRules before saving. The two legacy columns
+  // (buyIn, lmsAllOutRule) are kept in sync so the admin "Groups" screen and
+  // the LMS processor (which still reads lmsAllOutRule) stay consistent.
+  app.put("/api/group/rules", requireGroup, async (req, res) => {
+    try {
+      if (!(await isActiveGroupOwner(req))) {
+        return res.status(403).json({ error: "Only the group admin can change the rules" });
+      }
+      const { db } = await import("./db");
+      const { groups, resolveGroupRules, LMS_ALL_OUT_RULES } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const { resolveGroupRulesForGroup } = await import("./groupRules");
+      const [group] = await db
+        .select({ rules: groups.rules, buyIn: groups.buyIn, lmsAllOutRule: groups.lmsAllOutRule })
+        .from(groups)
+        .where(eq(groups.id, req.groupId!));
+      if (!group) return res.status(404).json({ error: "No such group" });
+
+      const current = resolveGroupRulesForGroup(group);
+      const body = (req.body ?? {}) as Partial<typeof current>;
+      // Merge incoming values onto the current rules, then clamp/normalise.
+      const merged = resolveGroupRules({
+        lawro: { ...current.lawro, ...(body.lawro ?? {}) },
+        lms: { ...current.lms, ...(body.lms ?? {}) },
+      });
+      // Keep the legacy columns in sync. allOutPolicy may now be one of the
+      // richer values (co_winners/no_winner) that the legacy column can't hold;
+      // only mirror it back when it's still a value the column understands,
+      // otherwise leave the column as-is (the blob is authoritative on read).
+      const columnUpdates: { buyIn: number; lmsAllOutRule?: string } = { buyIn: merged.lms.buyIn };
+      if ((LMS_ALL_OUT_RULES as readonly string[]).includes(merged.lms.allOutPolicy)) {
+        columnUpdates.lmsAllOutRule = merged.lms.allOutPolicy;
+      }
+      await db
+        .update(groups)
+        .set({ rules: merged, ...columnUpdates })
+        .where(eq(groups.id, req.groupId!));
+      res.json({ ok: true, rules: merged });
+    } catch (err: any) {
+      console.error("[/api/group/rules PUT] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to save rules" });
+    }
   });
 
   // ---- Web-push (kickoff reminders) ----

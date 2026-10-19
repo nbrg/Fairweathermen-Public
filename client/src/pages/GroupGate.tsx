@@ -48,6 +48,9 @@ export default function GroupGate() {
             <Button type="submit" disabled={submitting || !code.trim()} className="w-full">
               {submitting ? "Checking…" : "Enter"}
             </Button>
+            <p className="text-center text-xs text-gray-500">
+              No code yet? <a href="/create" className="underline">Create your own group</a>
+            </p>
           </form>
         </CardContent>
       </Card>
