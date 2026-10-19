@@ -4,10 +4,13 @@ import { lmsProcessor } from './lmsProcessor';
 import { syncGameweek, getLiveOrImminentGameweeks } from './footballDataApi';
 import { plLiveWindowActive, invalidatePlSchedule } from './scheduleGate';
 import { londonStringToUtcMs } from '@shared/time';
+import { getGroupRules } from './groupRules';
 import type { LmsCompetition, Match } from '@shared/schema';
 
-// Helper function to check if a gameweek is locked (deadline has passed)
-async function isGameweekLocked(gameweek: number): Promise<boolean> {
+// Selections lock `lockMinutesBeforeKickoff` minutes before the gameweek's
+// first match (0 = at kickoff, the long-standing behaviour). The offset comes
+// from the group's LMS rules.
+async function isGameweekLocked(gameweek: number, lockMinutesBeforeKickoff = 0): Promise<boolean> {
   const matches = await storage.getAllMatches();
   const gameweekMatches = matches.filter(m => m.gameweek === gameweek);
 
@@ -24,9 +27,11 @@ async function isGameweekLocked(gameweek: number): Promise<boolean> {
   const nowLondon = new Date().toLocaleString("en-US", { timeZone: "Europe/London" });
   const now = new Date(nowLondon);
 
-  // Treat database time as London time; selections lock at kickoff
-  const matchTimeLondon = new Date(earliestMatch.matchTime);
-  return now >= matchTimeLondon;
+  // Treat database time as London time; selections lock the configured number
+  // of minutes before the first match.
+  const matchTimeLondon = new Date(earliestMatch.matchTime).getTime();
+  const lockAt = matchTimeLondon - lockMinutesBeforeKickoff * 60 * 1000;
+  return now.getTime() >= lockAt;
 }
 
 // The teams playing a given gameweek in the current season, each mapped to its
@@ -48,7 +53,11 @@ export function eligibleTeamsForGameweek(matches: Match[], gameweek: number): Ma
 // passed in explicitly so this works for every group's competition, not just
 // the single newest active one. Exported so routes.ts shares this exact logic
 // rather than keeping a divergent copy.
-export async function assignRandomTeams(competition: LmsCompetition, gameweek: number): Promise<void> {
+export async function assignRandomTeams(
+  competition: LmsCompetition,
+  gameweek: number,
+  allowTeamReuse = false,
+): Promise<void> {
   // Don't assign teams for gameweeks before the competition started
   if (gameweek < competition.startGameweek) return;
 
@@ -72,9 +81,12 @@ export async function assignRandomTeams(competition: LmsCompetition, gameweek: n
     const hasSelectionForGameweek = selections.some(s => s.gameweek === gameweek);
     if (hasSelectionForGameweek) continue;
 
-    // Teams this participant has already used are ineligible.
+    // Teams this participant has already used are ineligible — unless the group
+    // allows reusing teams, in which case the whole pool is available.
     const usedTeamIds = new Set(selections.map(s => s.teamId));
-    const availableTeamIds = Array.from(eligible.keys()).filter(id => !usedTeamIds.has(id));
+    const availableTeamIds = allowTeamReuse
+      ? Array.from(eligible.keys())
+      : Array.from(eligible.keys()).filter(id => !usedTeamIds.has(id));
     if (availableTeamIds.length === 0) continue;
 
     const randomTeamId = availableTeamIds[Math.floor(Math.random() * availableTeamIds.length)];
@@ -90,6 +102,40 @@ export async function assignRandomTeams(competition: LmsCompetition, gameweek: n
     });
 
     console.log(`[Auto] Randomly assigned ${teamNames.get(randomTeamId) ?? `team ${randomTeamId}`} to participant ${participant.id} for gameweek ${gameweek}`);
+  }
+}
+
+// Apply a group's "missed pick" rule to everyone with no selection for a locked
+// gameweek. Default is "random" (assign a team), which reproduces the app's
+// long-standing behaviour. "eliminate" knocks the no-show out; "skip" leaves
+// them alone (they sit the week out, staying in the competition).
+export async function processMissedLmsPicks(
+  competition: LmsCompetition,
+  gameweek: number,
+): Promise<void> {
+  if (gameweek < competition.startGameweek) return;
+  const rules = await getGroupRules(competition.groupId);
+  const policy = rules.lms.missedPickPolicy;
+
+  if (policy === "random") {
+    await assignRandomTeams(competition, gameweek, rules.lms.allowTeamReuse);
+    return;
+  }
+  if (policy === "skip") {
+    return; // No pick, no penalty — they sit out this gameweek.
+  }
+
+  // "eliminate": knock out every active participant who has no pick this week.
+  const participants = await storage.getLmsParticipantsByCompetition(competition.id);
+  const activeParticipants = participants.filter(p => p.isActive === 'true');
+  for (const participant of activeParticipants) {
+    const selections = await storage.getLmsSelectionsByParticipant(participant.id);
+    if (selections.some(s => s.gameweek === gameweek)) continue;
+    await storage.updateLmsParticipant(participant.id, {
+      isActive: 'false',
+      eliminatedInRound: gameweek,
+    });
+    console.log(`[Auto] Eliminated participant ${participant.id} for missing GW${gameweek} (group rule: eliminate)`);
   }
 }
 
@@ -149,12 +195,14 @@ class AutoLmsProcessor {
     try {
       const currentGameweek = competition.currentGameweek || (competition as any).current_gameweek;
 
-      // Check if deadline has passed for current gameweek
-      const isLocked = await isGameweekLocked(currentGameweek);
+      // Check if the deadline (first kickoff, less the group's offset) has
+      // passed for the current gameweek.
+      const rules = await getGroupRules(competition.groupId);
+      const isLocked = await isGameweekLocked(currentGameweek, rules.lms.deadlineMinutesBeforeKickoff);
 
       if (isLocked) {
-        // Assign random teams to anyone who hasn't selected
-        await assignRandomTeams(competition, currentGameweek);
+        // Apply the group's missed-pick rule to anyone who hasn't selected.
+        await processMissedLmsPicks(competition, currentGameweek);
       }
     } catch (error) {
       console.error('[Auto] Error checking deadlines:', error);
@@ -189,6 +237,12 @@ class AutoLmsProcessor {
           await lmsProcessor.processLmsResults(competition);
         }
       }
+
+      // Prediction League counterpart: fill missed Lawro picks for any group
+      // whose rule is "random" (a no-op for the default "blank"). Gated by the
+      // same live window as above, so it only runs around kickoffs.
+      const { fillMissedLawroPicks } = await import('./lawroMissedPicks');
+      await fillMissedLawroPicks();
     } catch (error) {
       console.error('[Auto] Error in auto-processing:', error);
     } finally {

@@ -5,20 +5,18 @@ import { storage } from "./storage";
 import { runScraper } from "./scraper";
 import { insertTeamSchema, insertMatchSchema, insertPredictionSchema, insertGolfTournamentSchema, insertGolfScoreSchema, insertGolfPrizeWinnerSchema, REMINDER_LEAD_PRESETS_MINUTES } from "@shared/schema";
 import { getVisitorStats, updateScreenResolution } from "./visitorTracker";
+import { getGroupRules } from "./groupRules";
 import { getLocationFromIP, getRealIP } from "./geolocation";
 import { z } from "zod";
 import * as cron from "node-cron";
 
-// Helper function to check if a gameweek is locked (first match has started)
-// Per-group LMS lock offset (hours before the first match's kickoff at which
-// team selections lock). Mirror of LMS_RULES_BY_GROUP on the client side.
-const LMS_LOCK_HOURS_BY_GROUP: Record<string, number> = {
-  city: 0,
-};
 
+// Selections lock `lockMinutesBeforeKickoff` minutes before the gameweek's
+// first match. 0 = locks exactly at kickoff (the previous behaviour for every
+// group). The offset comes from the group's LMS rules.
 async function isGameweekLocked(
   gameweek: number,
-  lockHoursBeforeKickoff = 0,
+  lockMinutesBeforeKickoff = 0,
 ): Promise<boolean> {
   const matches = await storage.getAllMatches();
   const gameweekMatches = matches.filter(m => m.gameweek === gameweek);
@@ -36,10 +34,10 @@ async function isGameweekLocked(
   const nowLondon = new Date().toLocaleString("en-US", {timeZone: "Europe/London"});
   const now = new Date(nowLondon);
 
-  // Treat database time as London time; selections lock `lockHoursBeforeKickoff`
-  // hours before the first match. 0 = locks at kickoff (city).
+  // Treat database time as London time; selections lock the configured number
+  // of minutes before the first match.
   const matchTimeLondon = new Date(earliestMatch.matchTime).getTime();
-  const lockAt = matchTimeLondon - lockHoursBeforeKickoff * 60 * 60 * 1000;
+  const lockAt = matchTimeLondon - lockMinutesBeforeKickoff * 60 * 1000;
   return now.getTime() >= lockAt;
 }
 
@@ -103,14 +101,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return groupGames.filter((g) => userGames.includes(g));
   }
 
-  // True once a Prediction League ("Lawro") gameweek is past its deadline (the
-  // first kickoff). At that point the whole gameweek locks for editing; anyone
-  // without a pick is simply left blank. A null gameweek or a gameweek with no
-  // fixtures is treated as unlocked.
-  async function gameweekLocked(gameweek: number | null): Promise<boolean> {
+  // True once a Prediction League ("Lawro") gameweek is past its deadline. The
+  // deadline is the gameweek's first kickoff, brought forward by the group's
+  // configured `lawro.deadlineMinutesBeforeKickoff` (default 0). At that point
+  // the whole gameweek locks for editing; anyone without a pick is left blank.
+  // A null gameweek or a gameweek with no fixtures is treated as unlocked.
+  async function gameweekLocked(gameweek: number | null, groupId?: number): Promise<boolean> {
     if (gameweek == null) return false;
     const deadline = await storage.getGameweekDeadline(gameweek);
-    return deadline != null && Date.now() >= deadline.getTime();
+    if (deadline == null) return false;
+    const { getGroupRules } = await import("./groupRules");
+    const rules = await getGroupRules(groupId);
+    const offsetMs = rules.lawro.deadlineMinutesBeforeKickoff * 60 * 1000;
+    return Date.now() >= deadline.getTime() - offsetMs;
   }
 
   // Builds the session response for a person (identified by their login code),
@@ -1408,7 +1411,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // The whole gameweek locks at its deadline (the first kickoff). After that
       // point missed picks are auto-randomised, so no manual edits are allowed.
-      if (await gameweekLocked(match.gameweek)) {
+      if (await gameweekLocked(match.gameweek, req.groupId)) {
         return res.status(403).json({ error: "Predictions are locked - the gameweek deadline has passed" });
       }
 
@@ -1471,7 +1474,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Match not found" });
       }
 
-      if (await gameweekLocked(match.gameweek)) {
+      if (await gameweekLocked(match.gameweek, req.groupId)) {
         return res.status(403).json({ error: "Predictions are locked - the gameweek deadline has passed" });
       }
 
@@ -1520,7 +1523,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Match not found" });
       }
 
-      if (await gameweekLocked(match.gameweek)) {
+      if (await gameweekLocked(match.gameweek, req.groupId)) {
         return res.status(403).json({ error: "Predictions are locked - the gameweek deadline has passed" });
       }
 
@@ -1577,7 +1580,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // hidden: true) so the grid can show who's picked. Your own pick is always
       // shown, and every past/locked gameweek is shown for everyone.
       const currentGameweek = competition.currentGameweek;
-      const currentLocked = await isGameweekLocked(currentGameweek);
+      const currentRules = await getGroupRules(competition.groupId);
+      const currentLocked = await isGameweekLocked(
+        currentGameweek,
+        currentRules.lms.deadlineMinutesBeforeKickoff,
+      );
 
       const competitionWithDetails = {
         ...competition,
@@ -1690,9 +1697,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const participants = await storage.getLmsParticipantsByCompetition(competition.id);
       const userParticipant = participants.find(p => p.userId === userId);
       
-      // Get user's previous selections if they're a participant, otherwise empty set
+      // Get user's previous selections if they're a participant, otherwise empty
+      // set. When the group allows reusing teams, nothing is ever "used up", so
+      // leave the set empty and every team stays selectable.
+      const availRules = await getGroupRules(competition.groupId);
       let usedTeamIds = new Set<number>();
-      if (userParticipant) {
+      if (userParticipant && !availRules.lms.allowTeamReuse) {
         const userSelections = await storage.getLmsSelectionsByParticipant(userParticipant.id);
         usedTeamIds = new Set(userSelections.map(s => s.teamId));
       }
@@ -1727,8 +1737,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "No active competition found" });
       }
 
-      // Check if gameweek is locked (first match has started)
-      const isLocked = await isGameweekLocked(gameweek);
+      const selectRules = await getGroupRules(competition.groupId);
+
+      // Check if gameweek is locked (its deadline — the first match's kickoff,
+      // brought forward by the group's configured offset — has passed).
+      const isLocked = await isGameweekLocked(gameweek, selectRules.lms.deadlineMinutesBeforeKickoff);
       if (isLocked) {
         return res.status(400).json({ error: "Selection period has ended - the first match of this gameweek has already started" });
       }
@@ -1749,11 +1762,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Participant is eliminated from competition" });
       }
       
-      // Check if team was already used by this participant
+      // Check if team was already used by this participant — unless the group
+      // allows reusing teams, in which case repeats are fine.
       const participantSelections = await storage.getLmsSelectionsByParticipant(participantId);
       const teamAlreadyUsed = participantSelections.some(s => s.teamId === teamId);
-      
-      if (teamAlreadyUsed) {
+      if (teamAlreadyUsed && !selectRules.lms.allowTeamReuse) {
         return res.status(400).json({ error: "Team already selected in previous gameweek" });
       }
       
@@ -1880,7 +1893,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "No active competition found" });
       }
 
-      const isLocked = await isGameweekLocked(gameweek);
+      const removeRules = await getGroupRules(competition.groupId);
+      const isLocked = await isGameweekLocked(gameweek, removeRules.lms.deadlineMinutesBeforeKickoff);
       if (isLocked) {
         return res.status(400).json({ error: "Selection period has ended" });
       }
@@ -1965,31 +1979,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Invalid gameweek number" });
       }
 
-      // Look up the caller's group slug to find the right lock-offset rule.
-      let lockHours = 0;
-      if (req.groupId) {
-        const { db } = await import("./db");
-        const { groups } = await import("@shared/schema");
-        const { eq } = await import("drizzle-orm");
-        const [g] = await db.select().from(groups).where(eq(groups.id, req.groupId));
-        if (g) lockHours = LMS_LOCK_HOURS_BY_GROUP[g.slug] ?? 0;
-      }
-      const isLocked = await isGameweekLocked(gameweek, lockHours);
+      // The caller's group rules carry the LMS lock offset (minutes before the
+      // gameweek's first kickoff that selections lock; default 0).
+      const statusRules = await getGroupRules(req.groupId);
+      const lockMinutes = statusRules.lms.deadlineMinutesBeforeKickoff;
+      const isLocked = await isGameweekLocked(gameweek, lockMinutes);
 
-      // If the gameweek just became locked, process random assignments for the
-      // caller's group competition (not the newest one across all groups).
+      // If the gameweek just became locked, apply the caller's group missed-pick
+      // rule to its competition (not the newest one across all groups).
       if (isLocked) {
         const competition = await storage.getCurrentLmsCompetition(req.groupId);
         if (competition) {
-          const { assignRandomTeams } = await import("./autoLmsProcessor");
-          await assignRandomTeams(competition, gameweek);
+          const { processMissedLmsPicks } = await import("./autoLmsProcessor");
+          await processMissedLmsPicks(competition, gameweek);
         }
       }
 
       res.json({
         gameweek,
         isLocked,
-        lockHoursBeforeKickoff: lockHours,
+        lockMinutesBeforeKickoff: lockMinutes,
         message: isLocked ? "Selection period has ended" : "Selection period is active"
       });
     } catch (error) {

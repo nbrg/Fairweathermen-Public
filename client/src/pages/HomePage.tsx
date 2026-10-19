@@ -545,18 +545,23 @@ function PredictionsTab({
   );
 }
 
+// A group's configurable Lawro point values. Mirrors the server's
+// GroupRules.lawro; the default 3/1 reproduces the original hard-coded scoring.
+export type LawroPoints = { exact: number; result: number };
+const DEFAULT_LAWRO_POINTS: LawroPoints = { exact: 3, result: 1 };
+
 // Points a player scored on a set of predictions (already filtered to a scope).
-function tallyPoints(preds: Prediction[]) {
+function tallyPoints(preds: Prediction[], points: LawroPoints = DEFAULT_LAWRO_POINTS) {
   let exactScores = 0;
   let correctResults = 0;
   let totalPoints = 0;
   for (const p of preds) {
     if (p.status === "exact_score") {
       exactScores += 1;
-      totalPoints += 3;
+      totalPoints += points.exact;
     } else if (p.status === "correct_result") {
       correctResults += 1;
-      totalPoints += 1;
+      totalPoints += points.result;
     }
   }
   return { exactScores, correctResults, totalPoints };
@@ -593,6 +598,7 @@ function LeaderboardTab({
   currentGameweek,
   seasonStandings,
   userId,
+  points = DEFAULT_LAWRO_POINTS,
 }: {
   players: Player[];
   predictions: Prediction[];
@@ -601,6 +607,7 @@ function LeaderboardTab({
   currentGameweek: number;
   seasonStandings: LeaderboardEntry[];
   userId: number | undefined;
+  points?: LawroPoints;
 }) {
   // "season" (default) or a specific gameweek number.
   const [scope, setScope] = useState<"season" | number>("season");
@@ -624,11 +631,11 @@ function LeaderboardTab({
     }
     return players
       .map((p) => {
-        const t = tallyPoints(byUser.get(p.id) ?? []);
+        const t = tallyPoints(byUser.get(p.id) ?? [], points);
         return { id: p.id, username: p.username, predictions: [], ...t };
       })
       .sort(compareStandings);
-  }, [scope, seasonStandings, players, predictions, matches]);
+  }, [scope, seasonStandings, players, predictions, matches, points]);
 
   return (
     <div className="space-y-6">
@@ -765,11 +772,13 @@ function StatsTab({
   predictions,
   matches,
   availableGameweeks,
+  points = DEFAULT_LAWRO_POINTS,
 }: {
   players: Player[];
   predictions: Prediction[];
   matches: Match[];
   availableGameweeks: number[];
+  points?: LawroPoints;
 }) {
   // Gameweeks whose every fixture is finished — the basis for "per week" stats.
   const completedGameweeks = useMemo(
@@ -806,8 +815,8 @@ function StatsTab({
       s.finished += 1;
       let pts = 0;
       let gotExact = false;
-      if (pred.status === "exact_score") { s.exact += 1; pts = 3; gotExact = true; }
-      else if (pred.status === "correct_result") { s.correct += 1; pts = 1; }
+      if (pred.status === "exact_score") { s.exact += 1; pts = points.exact; gotExact = true; }
+      else if (pred.status === "correct_result") { s.correct += 1; pts = points.result; }
       s.points += pts;
       if (completedSet.has(gw)) {
         s.perGw.set(gw, (s.perGw.get(gw) ?? 0) + pts);
@@ -846,7 +855,7 @@ function StatsTab({
         mostExactWeek, mostExactWeekGw,
       };
     });
-  }, [players, predictions, gwOfMatch, completedSet, completedGameweeks]);
+  }, [players, predictions, gwOfMatch, completedSet, completedGameweeks, points]);
 
   type Row = (typeof rows)[number];
   type SortKey = "points" | "exact" | "correct" | "avgPerWeek" | "bestWeekPoints" | "worstWeekPoints" | "mostExactWeek" | "pickRate";
@@ -978,10 +987,12 @@ function TendenciesTab({
   players,
   predictions,
   matches,
+  points = DEFAULT_LAWRO_POINTS,
 }: {
   players: Player[];
   predictions: Prediction[];
   matches: Match[];
+  points?: LawroPoints;
 }) {
   const matchById = useMemo(() => {
     const m = new Map<number, Match>();
@@ -1065,7 +1076,7 @@ function TendenciesTab({
     for (const pred of predictions) {
       const gw = matchGw.get(pred.matchId);
       if (gw == null || !completedSet.has(gw)) continue;
-      const pts = pred.status === "exact_score" ? 3 : pred.status === "correct_result" ? 1 : 0;
+      const pts = pred.status === "exact_score" ? points.exact : pred.status === "correct_result" ? points.result : 0;
       const um = perUser.get(pred.userId);
       if (!um) continue;
       um.set(gw, (um.get(gw) ?? 0) + pts);
@@ -1085,7 +1096,7 @@ function TendenciesTab({
         return { name: p.username, avg: completed.length ? Number((total / completed.length).toFixed(1)) : 0, best, worst: worst ?? 0 };
       });
     return { weeks: completed.length, data };
-  }, [players, predictions, matches, rows]);
+  }, [players, predictions, matches, rows, points]);
 
   // Group-wide most-common predicted scorelines (top 10), split into exactly-right
   // (status "exact_score") vs the rest so the bars can carry a green correct fill.
@@ -1418,7 +1429,17 @@ export function PredictionsPage() {
   const { matches, isLoading: matchesLoading } = useMatches();
   const { leaderboard: seasonLeaderboard, isLoading: leaderboardLoading } = useLeaderboard();
   const { predictions, isLoading: predictionsLoading } = useAllPredictions();
-  const { user } = useGroup();
+  const { user, group } = useGroup();
+
+  // This group's configurable Lawro points (defaults 3/1), fed to the tabs so
+  // the client tallies match the group's own scoring rules.
+  const lawroPoints: LawroPoints = useMemo(
+    () => ({
+      exact: group?.rules?.lawro.exactScorePoints ?? DEFAULT_LAWRO_POINTS.exact,
+      result: group?.rules?.lawro.correctResultPoints ?? DEFAULT_LAWRO_POINTS.result,
+    }),
+    [group?.rules?.lawro.exactScorePoints, group?.rules?.lawro.correctResultPoints],
+  );
 
   const isLoading = matchesLoading || leaderboardLoading || predictionsLoading;
 
@@ -1518,6 +1539,7 @@ export function PredictionsPage() {
                 currentGameweek={currentGameweek}
                 seasonStandings={seasonStandings}
                 userId={user?.id}
+                points={lawroPoints}
               />
             </TabsContent>
 
@@ -1536,6 +1558,7 @@ export function PredictionsPage() {
                   players={players}
                   predictions={predictions as Prediction[]}
                   matches={matches}
+                  points={lawroPoints}
                 />
               </TabsContent>
             )}
@@ -1547,6 +1570,7 @@ export function PredictionsPage() {
                   predictions={predictions as Prediction[]}
                   matches={matches}
                   availableGameweeks={availableGameweeks}
+                  points={lawroPoints}
                 />
               </TabsContent>
             )}
