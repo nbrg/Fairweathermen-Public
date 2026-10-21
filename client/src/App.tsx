@@ -14,6 +14,9 @@ import AdminNotifications from "@/pages/AdminNotifications";
 import GolfPage from "@/pages/GolfPage";
 import GroupGate from "@/pages/GroupGate";
 import GroupSwitch from "@/pages/GroupSwitch";
+import CreateGroup from "@/pages/CreateGroup";
+import JoinGroup from "@/pages/JoinGroup";
+import GroupSettings from "@/pages/GroupSettings";
 import AuditPage from "@/pages/AuditPage";
 import ActivityPage from "@/pages/ActivityPage";
 import HelpPage from "@/pages/HelpPage";
@@ -94,6 +97,13 @@ function Router() {
       {/* Legacy alias so old links / push notifications still work. */}
       <Route path="/predictions" component={LawroRoute} />
       <Route path="/golf" component={GolfPage} />
+      {/* Self-service group creation + invites (public; see GatedShell). */}
+      <Route path="/create" component={CreateGroup} />
+      <Route path="/join/:token">
+        {(params) => <JoinGroup token={params.token} />}
+      </Route>
+      {/* Owner-only per-group rules + invite link. */}
+      <Route path="/group-settings" component={GroupSettings} />
       <Route path="/admin" component={AdminStats} />
       <Route path="/admin/players" component={AdminPlayers} />
       <Route path="/admin/notifications" component={AdminNotifications} />
@@ -155,6 +165,10 @@ function GatedShell() {
     typeof window !== "undefined" ? window.location.pathname : "/";
   const isAdminPath = path.startsWith("/admin");
   const isSwitchPath = path === "/switch";
+  // Public, pre-login pages: self-service group creation + invite links must be
+  // reachable without a group cookie.
+  const lowerPath = path.toLowerCase();
+  const isPublicPath = lowerPath === "/create" || lowerPath.startsWith("/join/");
 
   if (loading) {
     // Brief blank while we check the cookie; avoids a flash of the gate.
@@ -165,7 +179,7 @@ function GatedShell() {
     return <GroupSwitch />;
   }
 
-  if (!group && !isAdminPath) {
+  if (!group && !isAdminPath && !isPublicPath) {
     return <GroupGate />;
   }
 
