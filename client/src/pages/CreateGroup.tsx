@@ -60,7 +60,7 @@ export default function CreateGroup() {
         setError(data?.error || `Couldn't create the group (${res.status})`);
         return;
       }
-      setResult({ loginCode: data.loginCode, inviteUrl: data.inviteUrl });
+      setResult({ loginCode: data.code, inviteUrl: data.inviteUrl });
     } catch {
       setError("Network error — please try again.");
     } finally {

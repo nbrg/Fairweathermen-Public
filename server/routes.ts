@@ -316,7 +316,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const inviteUrl = `${req.protocol}://${req.get("host")}/join/${inviteToken}`;
       res.json({
         ok: true,
-        loginCode: adminRow.loginCode,
+        // Return the login code as `code`, not `loginCode`: the global /api
+        // scrub middleware (server/index.ts) strips any `loginCode` key from
+        // non-admin responses, so this creation flow would otherwise lose it.
+        code: adminRow.loginCode,
         inviteToken,
         inviteUrl,
         group: session?.payload ?? null,
@@ -401,7 +404,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const session = await buildSession(player.loginCode!, group.id);
       if (session) setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
-      res.json({ ok: true, loginCode: player.loginCode, group: session?.payload ?? null });
+      // `code`, not `loginCode`: the /api scrub middleware strips `loginCode`.
+      res.json({ ok: true, code: player.loginCode, group: session?.payload ?? null });
     } catch (err: any) {
       console.error("[/api/group/join POST] error:", err);
       res.status(500).json({ error: err?.message || "Failed to join group" });

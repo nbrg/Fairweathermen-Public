@@ -53,7 +53,7 @@ export default function JoinGroup({ token }: { token: string }) {
         setError(data?.error || `Couldn't join (${res.status})`);
         return;
       }
-      setLoginCode(data.loginCode);
+      setLoginCode(data.code);
     } catch {
       setError("Network error — please try again.");
     } finally {

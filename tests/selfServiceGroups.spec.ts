@@ -19,7 +19,9 @@ test.describe("self-service group creation + invites", () => {
     });
     expect(res.ok(), `create failed: ${res.status()}`).toBeTruthy();
     const body = await res.json();
-    expect(body.loginCode).toBeTruthy();
+    // The code comes back as `code` (the /api scrub middleware strips a
+    // `loginCode` key), so this is what create/join expose it under.
+    expect(body.code).toBeTruthy();
     expect(body.inviteToken).toBeTruthy();
     expect(body.inviteUrl).toContain(`/join/${body.inviteToken}`);
     expect(body.group?.name).toBe(name);
@@ -72,7 +74,7 @@ test.describe("self-service group creation + invites", () => {
     });
     expect(joinRes.ok(), `join failed: ${joinRes.status()}`).toBeTruthy();
     const joinBody = await joinRes.json();
-    expect(joinBody.loginCode).toBeTruthy();
+    expect(joinBody.code).toBeTruthy();
 
     // The joiner is now in the group but isn't its owner.
     const joinerMe = await joiner.get("/api/group/me");
