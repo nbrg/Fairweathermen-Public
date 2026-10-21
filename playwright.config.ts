@@ -59,7 +59,10 @@ export default defineConfig({
   },
   projects,
   webServer: {
-    command: "npm run dev",
+    // Playwright starts the web server BEFORE running globalSetup, so the
+    // schema has to exist before the server boots (its startup data-init would
+    // otherwise crash against empty tables). Push the schema first, then boot.
+    command: "npx drizzle-kit push --force && npm run dev",
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
