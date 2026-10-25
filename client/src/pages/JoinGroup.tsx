@@ -15,6 +15,9 @@ export default function JoinGroup({ token }: { token: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loginCode, setLoginCode] = useState<string | null>(null);
+  // True when the joiner was already signed in, so the group was added to their
+  // existing login (same code) rather than giving them a new one.
+  const [linked, setLinked] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,6 +57,7 @@ export default function JoinGroup({ token }: { token: string }) {
         return;
       }
       setLoginCode(data.code);
+      setLinked(!!data.linked);
     } catch {
       setError("Network error — please try again.");
     } finally {
@@ -89,7 +93,11 @@ export default function JoinGroup({ token }: { token: string }) {
         <Card className="w-full max-w-sm">
           <CardHeader>
             <CardTitle className="text-xl">You're in 🎉</CardTitle>
-            <p className="text-sm text-gray-500 mt-1">Save your personal login code.</p>
+            <p className="text-sm text-gray-500 mt-1">
+              {linked
+                ? `${groupName} is now on your account — same login code as before.`
+                : "Save your personal login code."}
+            </p>
           </CardHeader>
           <CardContent className="space-y-4">
             <div>
