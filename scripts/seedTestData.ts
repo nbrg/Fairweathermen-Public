@@ -35,8 +35,8 @@ function londonAt(offsetDays: number, hour = 15): string {
 async function reset() {
   // Wipe every table and reset identity sequences so the seed always produces
   // the same ids (group 1, users 1-3, …). TRUNCATE ... CASCADE is FK-safe and
-  // clears tables the tests themselves create rows in (extra groups, golf
-  // scores, activity logs), so the suite is order-independent and safe to
+  // clears tables the tests themselves create rows in (extra groups,
+  // activity logs), so the suite is order-independent and safe to
   // re-run across every browser project.
   const { rows } = await pool.query<{ tablename: string }>(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
@@ -54,7 +54,7 @@ async function main() {
     .values({
       slug: "demo",
       name: "Demo League",
-      enabledGames: ["predictions", "lms", "golf"],
+      enabledGames: ["predictions", "lms"],
       buyIn: 5,
       lmsAllOutRule: "rollover",
     })
@@ -137,13 +137,14 @@ async function main() {
 
   // A second group Alex also belongs to, under the same personal login code, so
   // the multi-group switcher and cross-group game tabs can be exercised. Rovers
-  // plays LMS + Lawro (no golf), so switching changes the visible games.
+  // plays LMS only (no Lawro), while Demo League plays both, so switching
+  // between them changes the visible games and the primary landing game.
   const [rovers] = await db
     .insert(groups)
     .values({
       slug: "rovers",
       name: "Rovers",
-      enabledGames: ["lms", "predictions"],
+      enabledGames: ["lms"],
       buyIn: 10,
       lmsAllOutRule: "revive",
     })

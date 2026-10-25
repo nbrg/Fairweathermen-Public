@@ -14,7 +14,7 @@ import { NotificationBell } from "@/components/NotificationBell";
 // the cached game data (in GroupContext) so all pages reload for the new group.
 function GroupSwitcher() {
   const { group, availableGroups, switchGroup } = useGroup();
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
   if (availableGroups.length <= 1 || !group) return null;
 
   return (
@@ -23,11 +23,17 @@ function GroupSwitcher() {
       onValueChange={async (v) => {
         const id = Number(v);
         if (id === group.id) return;
+        // Stay on the current game tab if the new group offers it to this
+        // person (e.g. Lawro in one group → Lawro in another). Otherwise send
+        // them to the landing route so the new group's primary game renders,
+        // rather than the previous group's page under the new group.
+        const currentGame = GAME_TABS.find(
+          (t) => location === t.route || t.aliases?.includes(location),
+        )?.key;
+        const targetGames = availableGroups.find((g) => g.id === id)?.enabledGames ?? [];
+        const stay = currentGame != null && targetGames.includes(currentGame);
         const res = await switchGroup(id);
-        // Send them to the landing route so the newly-active group's primary
-        // game renders. Without this the current route stays put and you'd see
-        // the previous group's page (e.g. LMS) under the new group.
-        if (res.ok) navigate("/");
+        if (res.ok && !stay) navigate("/");
       }}
     >
       <SelectTrigger data-testid="group-switcher" className="h-8 w-auto min-w-[8rem] bg-white/10 border-white/20 text-white text-sm font-medium">
@@ -44,22 +50,21 @@ function GroupSwitcher() {
   );
 }
 
-// Ordered game tabs — LMS, Lawro, Golf. Each game is shown if ANY of the
-// person's groups offers it (not just the active one), so e.g. a City member
-// who also plays Lawro sees a Lawro tab without opening the group dropdown.
-// Clicking a tab that belongs to a different group switches them into that
-// group first, then navigates.
-const GAME_TABS: { key: string; label: string; route: string }[] = [
-  { key: "lms", label: "Last Man Standing", route: "/last-man-standing" },
-  { key: "predictions", label: "Lawro", route: "/lawro" },
-  { key: "golf", label: "Golf", route: "/golf" },
+// Ordered game tabs — LMS, Lawro. Each game is shown if ANY of the person's
+// groups offers it (not just the active one), so e.g. a City member who also
+// plays Lawro sees a Lawro tab without opening the group dropdown. Clicking a
+// tab that belongs to a different group switches them into that group first,
+// then navigates.
+const GAME_TABS: { key: string; label: string; route: string; aliases?: string[] }[] = [
+  { key: "lms", label: "Last Man Standing", route: "/last-man-standing", aliases: ["/lms"] },
+  { key: "predictions", label: "Lawro", route: "/lawro", aliases: ["/predictions"] },
 ];
 
 export function Header() {
   const [location, navigate] = useLocation();
   const { group, availableGroups, switchGroup } = useGroup();
 
-  const activeGamesList = group?.enabledGames ?? ["lms", "golf", "predictions"];
+  const activeGamesList = group?.enabledGames ?? ["lms", "predictions"];
   const activeGames = new Set(activeGamesList);
 
   // Which group hosts each game: prefer the active group for games it offers, so
@@ -89,8 +94,6 @@ export function Header() {
           location === "/lms" ||
           (location === "/" && rootIsLms)
         );
-      case "golf":
-        return location === "/golf";
       case "predictions":
         return location === "/lawro" || location === "/predictions" || (location === "/" && rootIsPredictions);
       default:

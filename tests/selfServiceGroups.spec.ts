@@ -47,12 +47,12 @@ test.describe("self-service group creation + invites", () => {
     });
     expect(noGame.status()).toBe(400);
 
-    // Golf isn't a self-serve game (needs seeded data), so a golf-only request
-    // has no valid games and is rejected.
-    const golfOnly = await request.post("/api/group/create", {
-      data: { groupName: uniqueName(), adminName: "Pat", games: ["golf"] },
+    // A game this edition doesn't run leaves the request with no valid games,
+    // so it's rejected.
+    const unknownGame = await request.post("/api/group/create", {
+      data: { groupName: uniqueName(), adminName: "Pat", games: ["pingpong"] },
     });
-    expect(golfOnly.status()).toBe(400);
+    expect(unknownGame.status()).toBe(400);
   });
 
   test("invite link describes the group, and a player can join for a code", async ({ request, playwright, baseURL }) => {

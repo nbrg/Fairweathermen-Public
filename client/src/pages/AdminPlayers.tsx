@@ -22,7 +22,6 @@ type Player = {
 // Human labels for the game keys stored in enabledGames.
 const GAME_LABELS: Record<string, string> = {
   lms: "LMS",
-  golf: "Golf",
   predictions: "Lawro",
 };
 type GroupWithPlayers = {
@@ -36,7 +35,7 @@ type GroupWithPlayers = {
   players: Player[];
 };
 
-const ALL_GAMES = ["lms", "predictions", "golf"] as const;
+const ALL_GAMES = ["lms", "predictions"] as const;
 
 const ALL_OUT_RULES: { value: string; label: string }[] = [
   { value: "rollover", label: "Rollover — no winner, a fresh competition starts" },
@@ -129,7 +128,7 @@ export default function AdminPlayers() {
     const groupHasLms = group.enabledGames.includes("lms");
     const message = groupHasLms
       ? `Remove "${player.username}" from ${group.name}'s current Last Man Standing competition? ` +
-        `They'll stay in past LMS competitions and golf.`
+        `They'll stay in past LMS competitions.`
       : `Remove "${player.username}" from ${group.name}? This deletes their picks and takes ` +
         `their name out of the game. Any other groups they're in are unchanged.`;
     if (!window.confirm(message)) {
@@ -306,7 +305,7 @@ export default function AdminPlayers() {
             LMS competition. For a predictions-only group (Lawro) it just adds the
             player and their code — that's all they need to sign in and play.
             <strong> Remove</strong> takes them out of the current LMS competition
-            only — their past LMS competitions, golf and predictions records are
+            only — their past LMS competitions and predictions records are
             kept, and their account is not deleted.
           </p>
           <p className="text-sm text-gray-600 mt-2">
@@ -318,7 +317,7 @@ export default function AdminPlayers() {
           <p className="text-sm text-gray-600 mt-2">
             For groups that run more than one game, the <strong>Sees</strong>{" "}
             toggles under each player control which game tabs that person sees.
-            All on by default — e.g. turn off Golf for a player who only
+            All on by default — e.g. turn off Lawro for a player who only
             plays Last Man Standing.
           </p>
         </div>

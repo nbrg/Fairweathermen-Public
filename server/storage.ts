@@ -4,11 +4,8 @@ import {
   UserWithPredictions, LmsCompetition, LmsParticipant, LmsSelection,
   InsertLmsCompetition, InsertLmsParticipant, InsertLmsSelection,
   LmsSelectionLog, InsertLmsSelectionLog, ActivityLog, InsertActivityLog,
-  GolfTournament, GolfScore, InsertGolfTournament, InsertGolfScore,
-  GolfPrizeWinner, InsertGolfPrizeWinner,
-  GolfHandicap, InsertGolfHandicap,
   users, teams, matches, predictions, lmsCompetitions, lmsParticipants, lmsSelections,
-  lmsSelectionLogs, activityLogs, golfTournaments, golfScores, golfPrizeWinners, golfHandicaps,
+  lmsSelectionLogs, activityLogs,
 } from "@shared/schema";
 import { londonStringToUtcMs } from "@shared/time";
 import { db } from "./db";
@@ -81,31 +78,6 @@ export interface IStorage {
   // Activity Logs
   createActivityLog(log: InsertActivityLog): Promise<ActivityLog>;
   getActivityLogs(limit?: number): Promise<ActivityLog[]>;
-  
-  // Golf methods
-  getGolfTournament(id: number): Promise<GolfTournament | undefined>;
-  createGolfTournament(tournament: InsertGolfTournament): Promise<GolfTournament>;
-  getAllGolfTournaments(): Promise<GolfTournament[]>;
-  
-  getGolfScore(id: number): Promise<GolfScore | undefined>;
-  createGolfScore(score: InsertGolfScore): Promise<GolfScore>;
-  updateGolfScore(id: number, score: Partial<GolfScore>): Promise<GolfScore | undefined>;
-  deleteGolfScore(id: number): Promise<void>;
-  getGolfScoresByTournament(tournamentId: number): Promise<GolfScore[]>;
-  getGolfScoresByTournamentAndPlayer(tournamentId: number, playerName: string): Promise<GolfScore[]>;
-  
-  // Golf Prize Winner methods
-  getGolfPrizeWinner(id: number): Promise<GolfPrizeWinner | undefined>;
-  createGolfPrizeWinner(prizeWinner: InsertGolfPrizeWinner): Promise<GolfPrizeWinner>;
-  updateGolfPrizeWinner(id: number, prizeWinner: Partial<GolfPrizeWinner>): Promise<GolfPrizeWinner | undefined>;
-  deleteGolfPrizeWinner(id: number): Promise<void>;
-  getGolfPrizeWinnersByTournament(tournamentId: number): Promise<GolfPrizeWinner[]>;
-  getGolfPrizeWinnerByTournamentAndPrize(tournamentId: number, prizeKey: string): Promise<GolfPrizeWinner | undefined>;
-  setGolfPrizeWinner(tournamentId: number, prizeKey: string, winnerName: string): Promise<GolfPrizeWinner>;
-
-  // Golf Handicap methods
-  getGolfHandicapsByTournament(tournamentSlug: string): Promise<GolfHandicap[]>;
-  setGolfHandicap(tournamentSlug: string, playerName: string, handicap: number): Promise<GolfHandicap>;
 }
 
 // We keep every season's fixtures in the `matches` table (for history), but the
@@ -746,151 +718,6 @@ export class DatabaseStorage implements IStorage {
     return await this.getAllTeams();
   }
 
-  // Golf methods
-  async getGolfTournament(id: number): Promise<GolfTournament | undefined> {
-    const [tournament] = await db.select().from(golfTournaments).where(eq(golfTournaments.id, id));
-    return tournament || undefined;
-  }
-
-  async createGolfTournament(tournament: InsertGolfTournament): Promise<GolfTournament> {
-    const result = await db.insert(golfTournaments).values({
-      name: tournament.name,
-      courseId: tournament.courseId,
-      status: tournament.status || 'active'
-    }).returning();
-    return result[0];
-  }
-
-  async getAllGolfTournaments(): Promise<GolfTournament[]> {
-    return await db.select().from(golfTournaments);
-  }
-
-  async getGolfScore(id: number): Promise<GolfScore | undefined> {
-    const [score] = await db.select().from(golfScores).where(eq(golfScores.id, id));
-    return score || undefined;
-  }
-
-  async createGolfScore(score: InsertGolfScore): Promise<GolfScore> {
-    const now = new Date();
-    const result = await db.insert(golfScores).values({
-      tournamentId: score.tournamentId,
-      playerName: score.playerName,
-      hole: score.hole,
-      day: score.day,
-      score: score.score || null,
-      createdAt: now,
-      updatedAt: now
-    }).returning();
-    return result[0];
-  }
-
-  async updateGolfScore(id: number, score: Partial<GolfScore>): Promise<GolfScore | undefined> {
-    const updateData: any = {};
-    if (score.score !== undefined) updateData.score = score.score;
-    updateData.updatedAt = new Date();
-    
-    const result = await db.update(golfScores)
-      .set(updateData)
-      .where(eq(golfScores.id, id))
-      .returning();
-    return result[0] || undefined;
-  }
-
-  async deleteGolfScore(id: number): Promise<void> {
-    await db.delete(golfScores).where(eq(golfScores.id, id));
-  }
-
-  async getGolfScoresByTournament(tournamentId: number): Promise<GolfScore[]> {
-    return await db.select().from(golfScores).where(eq(golfScores.tournamentId, tournamentId));
-  }
-
-  async getGolfScoresByTournamentAndPlayer(tournamentId: number, playerName: string): Promise<GolfScore[]> {
-    return await db.select().from(golfScores)
-      .where(and(eq(golfScores.tournamentId, tournamentId), eq(golfScores.playerName, playerName)));
-  }
-
-  // Golf Prize Winner methods
-  async getGolfPrizeWinner(id: number): Promise<GolfPrizeWinner | undefined> {
-    const [prizeWinner] = await db.select().from(golfPrizeWinners).where(eq(golfPrizeWinners.id, id));
-    return prizeWinner || undefined;
-  }
-
-  async createGolfPrizeWinner(prizeWinner: InsertGolfPrizeWinner): Promise<GolfPrizeWinner> {
-    const now = new Date();
-    const result = await db.insert(golfPrizeWinners).values({
-      tournamentId: prizeWinner.tournamentId,
-      prizeKey: prizeWinner.prizeKey,
-      winnerName: prizeWinner.winnerName,
-      createdAt: now,
-      updatedAt: now
-    }).returning();
-    return result[0];
-  }
-
-  async updateGolfPrizeWinner(id: number, prizeWinner: Partial<GolfPrizeWinner>): Promise<GolfPrizeWinner | undefined> {
-    const updateData: any = { updatedAt: new Date() };
-    if (prizeWinner.winnerName !== undefined) updateData.winnerName = prizeWinner.winnerName;
-    if (prizeWinner.prizeKey !== undefined) updateData.prizeKey = prizeWinner.prizeKey;
-    
-    const result = await db.update(golfPrizeWinners)
-      .set(updateData)
-      .where(eq(golfPrizeWinners.id, id))
-      .returning();
-    return result[0] || undefined;
-  }
-
-  async deleteGolfPrizeWinner(id: number): Promise<void> {
-    await db.delete(golfPrizeWinners).where(eq(golfPrizeWinners.id, id));
-  }
-
-  async getGolfPrizeWinnersByTournament(tournamentId: number): Promise<GolfPrizeWinner[]> {
-    return await db.select().from(golfPrizeWinners).where(eq(golfPrizeWinners.tournamentId, tournamentId));
-  }
-
-  async getGolfPrizeWinnerByTournamentAndPrize(tournamentId: number, prizeKey: string): Promise<GolfPrizeWinner | undefined> {
-    const [prizeWinner] = await db.select().from(golfPrizeWinners)
-      .where(and(eq(golfPrizeWinners.tournamentId, tournamentId), eq(golfPrizeWinners.prizeKey, prizeKey)));
-    return prizeWinner || undefined;
-  }
-
-  async setGolfPrizeWinner(tournamentId: number, prizeKey: string, winnerName: string): Promise<GolfPrizeWinner> {
-    // Check if a prize winner already exists for this tournament and prize
-    const existing = await this.getGolfPrizeWinnerByTournamentAndPrize(tournamentId, prizeKey);
-    
-    if (existing) {
-      // Update existing prize winner
-      const updated = await this.updateGolfPrizeWinner(existing.id, { winnerName });
-      return updated!;
-    } else {
-      // Create new prize winner
-      return await this.createGolfPrizeWinner({
-        tournamentId,
-        prizeKey,
-        winnerName
-      });
-    }
-  }
-
-  async getGolfHandicapsByTournament(tournamentSlug: string): Promise<GolfHandicap[]> {
-    return await db.select().from(golfHandicaps).where(eq(golfHandicaps.tournamentSlug, tournamentSlug));
-  }
-
-  async setGolfHandicap(tournamentSlug: string, playerName: string, handicap: number): Promise<GolfHandicap> {
-    const existing = await db.select().from(golfHandicaps)
-      .where(and(eq(golfHandicaps.tournamentSlug, tournamentSlug), eq(golfHandicaps.playerName, playerName)));
-    if (existing.length > 0) {
-      const [updated] = await db.update(golfHandicaps)
-        .set({ handicap, lastUpdated: new Date() })
-        .where(eq(golfHandicaps.id, existing[0].id))
-        .returning();
-      return updated;
-    } else {
-      const [created] = await db.insert(golfHandicaps)
-        .values({ tournamentSlug, playerName, handicap })
-        .returning();
-      return created;
-    }
-  }
 }
 
 // Use the database storage implementation

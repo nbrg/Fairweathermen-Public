@@ -11,7 +11,6 @@ import AdminPage from "@/pages/AdminPage";
 import LastManStandingPage from "./pages/LastManStandingPage";
 import AdminPlayers from "@/pages/AdminPlayers";
 import AdminNotifications from "@/pages/AdminNotifications";
-import GolfPage from "@/pages/GolfPage";
 import GroupGate from "@/pages/GroupGate";
 import GroupSwitch from "@/pages/GroupSwitch";
 import CreateGroup from "@/pages/CreateGroup";
@@ -26,14 +25,13 @@ import { usePageTracking } from "@/hooks/usePageTracking";
 
 // The landing page (/) defaults to the group's primary game, in priority
 // order: Last Man Standing (the year-round game), then the Prediction League
-// ("Lawro"), then Golf. Keep this precedence in step with the highlight logic
-// in Header.tsx.
+// ("Lawro"). Keep this precedence in step with the highlight logic in
+// Header.tsx.
 function DefaultGame() {
   const { group } = useGroup();
-  const enabled = new Set(group?.enabledGames ?? ["lms", "golf", "predictions"]);
+  const enabled = new Set(group?.enabledGames ?? ["lms", "predictions"]);
   if (enabled.has("lms")) return <LastManStandingPage />;
-  if (enabled.has("predictions")) return <HomePage />;
-  return <GolfPage />;
+  return <HomePage />;
 }
 
 // Renders the Prediction League ("Lawro") page, but first makes sure the active
@@ -88,15 +86,20 @@ function Router() {
     window.scrollTo(0, 0);
   }, [location]);
 
+  // Remount the page whenever the active group changes. Switching group keeps
+  // you on the same game route when the new group offers it (see Header's
+  // GroupSwitcher), so without this a page would carry the old group's local
+  // state (selected round, competition, tab) into the new group.
+  const { group } = useGroup();
+
   return (
-    <Switch>
+    <Switch key={group?.id ?? "none"}>
       <Route path="/" component={DefaultGame} />
       <Route path="/last-man-standing" component={LastManStandingPage} />
       <Route path="/lms" component={LastManStandingPage} />
       <Route path="/lawro" component={LawroRoute} />
       {/* Legacy alias so old links / push notifications still work. */}
       <Route path="/predictions" component={LawroRoute} />
-      <Route path="/golf" component={GolfPage} />
       {/* Self-service group creation + invites (public; see GatedShell). */}
       <Route path="/create" component={CreateGroup} />
       <Route path="/join/:token">
