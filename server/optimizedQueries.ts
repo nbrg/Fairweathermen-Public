@@ -1,8 +1,26 @@
 import { db } from "./db";
-import { matches, predictions, teams, users } from "@shared/schema";
+import { groups, matches, predictions, teams, users } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { Match, MatchWithTeams, Prediction, PredictionWithMatch, Team, User, UserWithPredictions } from "@shared/schema";
+import { DEFAULT_GROUP_RULES, resolveGroupRules } from "@shared/schema";
 import { performance } from "perf_hooks";
+
+// Lawro points for a group, resolved from its rules (falls back to the built-in
+// 3/1 defaults when no group is given or it has no overrides). Centralises the
+// one place the point values come from so the scoring + leaderboard agree.
+async function lawroPointsForGroup(
+  groupId?: number,
+): Promise<{ exact: number; result: number }> {
+  if (groupId == null) {
+    return {
+      exact: DEFAULT_GROUP_RULES.lawro.exactScorePoints,
+      result: DEFAULT_GROUP_RULES.lawro.correctResultPoints,
+    };
+  }
+  const [group] = await db.select({ rules: groups.rules }).from(groups).where(eq(groups.id, groupId));
+  const rules = resolveGroupRules(group?.rules);
+  return { exact: rules.lawro.exactScorePoints, result: rules.lawro.correctResultPoints };
+}
 
 // Keep only the latest season's rows (mirrors storage.filterToCurrentSeason).
 // Falls back to all rows if none are season-tagged (legacy data).
@@ -79,6 +97,9 @@ export async function getOptimizedPredictionsWithMatches(groupId?: number): Prom
     // Step 3: Get all teams in a single query
     const allTeams = await db.select().from(teams);
     console.log(`Got ${allTeams.length} teams in ${Math.round(performance.now() - startTime)}ms`);
+
+    // This group's configurable Lawro point values (defaults 3/1).
+    const points = await lawroPointsForGroup(groupId);
     
     // Step 4: Create lookup maps for O(1) access
     const teamsMap = new Map<number, Team>();
@@ -109,8 +130,8 @@ export async function getOptimizedPredictionsWithMatches(groupId?: number): Prom
       const matchPredictions = allPredictions.filter(p => p.matchId === match.id);
       
       for (const prediction of matchPredictions) {
-        const { points, status } = calculatePoints(prediction, match);
-        
+        const { points: predPoints, status } = calculatePoints(prediction, match, points);
+
         result.push({
           ...prediction,
           match: {
@@ -118,7 +139,7 @@ export async function getOptimizedPredictionsWithMatches(groupId?: number): Prom
             homeTeam: teamsMap.get(match.homeTeamId)!,
             awayTeam: teamsMap.get(match.awayTeamId)!
           },
-          points,
+          points: predPoints,
           status: status as any
         });
       }
@@ -152,6 +173,10 @@ export async function getOptimizedLeaderboard(groupId?: number): Promise<UserWit
 
     // Step: 2: Get optimized predictions with matches (same group scope)
     const allPredictionsWithMatches = await getOptimizedPredictionsWithMatches(groupId);
+
+    // This group's configurable Lawro point values (defaults 3/1), so the
+    // leaderboard tally matches the per-prediction scoring above.
+    const points = await lawroPointsForGroup(groupId);
     
     // Step 3: Group predictions by user ID
     const predictionsByUser = new Map<number, PredictionWithMatch[]>();
@@ -176,10 +201,10 @@ export async function getOptimizedLeaderboard(groupId?: number): Promise<UserWit
       for (const prediction of userPredictions) {
         if (prediction.status === "exact_score") {
           exactScores++;
-          totalPoints += 3;
+          totalPoints += points.exact;
         } else if (prediction.status === "correct_result") {
           correctResults++;
-          totalPoints += 1;
+          totalPoints += points.result;
         }
       }
       
@@ -214,15 +239,22 @@ export async function getOptimizedLeaderboard(groupId?: number): Promise<UserWit
 /**
  * Helper function to calculate points for a prediction
  */
-function calculatePoints(prediction: Prediction, match: Match): { points: number, status: string } {
+function calculatePoints(
+  prediction: Prediction,
+  match: Match,
+  points: { exact: number; result: number } = {
+    exact: DEFAULT_GROUP_RULES.lawro.exactScorePoints,
+    result: DEFAULT_GROUP_RULES.lawro.correctResultPoints,
+  },
+): { points: number, status: string } {
   // If match hasn't started or doesn't have scores yet
   if (match.status === "not_started" || match.homeScore === null || match.awayScore === null) {
     return { points: 0, status: "not_started" };
   }
-  
-  // Exact score (3 points)
+
+  // Exact score (configurable; default 3 points)
   if (prediction.homeScore === match.homeScore && prediction.awayScore === match.awayScore) {
-    return { points: 3, status: "exact_score" };
+    return { points: points.exact, status: "exact_score" };
   }
   
   // Correct result type: win, lose, or draw (1 point)
@@ -239,7 +271,7 @@ function calculatePoints(prediction: Prediction, match: Match): { points: number
       : "draw";
   
   if (predictionResult === matchResult) {
-    return { points: 1, status: "correct_result" };
+    return { points: points.result, status: "correct_result" };
   }
   
   // Incorrect result (0 points)

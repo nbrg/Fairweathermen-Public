@@ -139,6 +139,32 @@ req.groupId)`** (see `server/groupAuth.ts`) so a caller in one group can't write
 in another. Any new query that reads user/competition rows should filter by the relevant
 `groupId`. Pick changes should be recorded with `logAuditEvent` for the `/audit` view.
 
+### Self-service groups & per-group rules
+
+Anyone can create their own group from the public pages (no admin key needed):
+
+- `POST /api/group/create` ({ groupName, adminName, games }) — makes the group, makes the caller
+  its first player **and** its admin (`groups.ownerUserId`), mints an invite token, logs them in,
+  and returns their login code + invite link. `GET /api/group/invite/:token` describes a group for
+  the join page; `POST /api/group/join/:token` ({ name }) creates the joiner's player row + login
+  code and signs them in. Self-service groups may run `lms` and `predictions`. Client pages:
+  `/create`, `/join/:token` (both public — see `GatedShell`).
+- **Per-group rules** live on `groups.rules` (a partial `GroupRules`; NULL = defaults). Always read
+  through `server/groupRules.ts`'s `getGroupRules(groupId)` so partial blobs merge onto
+  `DEFAULT_GROUP_RULES` — every default reproduces the old hard-coded behaviour, so existing groups
+  are unchanged until their admin edits something. `getGroupRules` also **bridges the legacy
+  `groups.buyIn` / `groups.lmsAllOutRule` columns** (still written by the admin "Groups" screen) in
+  as the lms buy-in / all-out fallback, so a group configured either way resolves correctly; a value
+  in the `rules` blob wins. The admin (owner only) edits the rules at `/group-settings` via
+  `GET`/`PUT /api/group/rules`. Covered knobs: Lawro points (exact/result, threaded through
+  `optimizedQueries.ts` scoring + `HomePage.tsx` tallies), Lawro/LMS deadline offset (minutes before
+  first kickoff), Lawro missed-pick policy (blank/random — random is filled by
+  `server/lawroMissedPicks.ts` off the per-minute processor), LMS buy-in, lives (cumulative-loss
+  derivation in `lmsProcessor.ts`, idempotent), allow team reuse, LMS missed-pick policy
+  (random/eliminate/skip in `autoLmsProcessor.ts`) and all-out policy — the existing `revive`
+  alongside `rollover`/`co_winners`/`no_winner`. Session payload (`/api/group/me`) carries the
+  resolved `rules` + `isOwner`.
+
 ## Environment variables
 
 - `DATABASE_URL` — Neon Postgres connection string (required; server refuses to boot without it).

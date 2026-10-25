@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { queryClient } from "@/lib/queryClient";
+import type { GroupRules } from "@shared/schema";
 
 export type SessionUser = {
   id: number;
@@ -26,6 +27,12 @@ export type Group = {
   // Every group this person can switch between (one entry per group they
   // belong to). Length > 1 means the header shows a group switcher.
   availableGroups?: GroupSummary[];
+  // This group's resolved rules (defaults merged, legacy columns bridged).
+  // Lets the client score / label using the group's own settings.
+  rules?: GroupRules;
+  // True when the logged-in person created this group (is its admin). Gates the
+  // owner-only group settings page + header link.
+  isOwner?: boolean;
 };
 
 type GroupContextValue = {

@@ -167,6 +167,14 @@ export function Header() {
           {(showSwitcher || group) && (
             <div className="flex items-center justify-end gap-2">
               {showSwitcher && <GroupSwitcher />}
+              {group?.isOwner && (
+                <Link
+                  href="/group-settings"
+                  className="rounded-md px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20 whitespace-nowrap"
+                >
+                  Settings
+                </Link>
+              )}
               {group && <NotificationBell />}
             </div>
           )}
