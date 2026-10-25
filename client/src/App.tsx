@@ -85,8 +85,14 @@ function Router() {
     window.scrollTo(0, 0);
   }, [location]);
 
+  // Remount the page whenever the active group changes. Switching group keeps
+  // you on the same game route when the new group offers it (see Header's
+  // GroupSwitcher), so without this a page would carry the old group's local
+  // state (selected round, competition, tab) into the new group.
+  const { group } = useGroup();
+
   return (
-    <Switch>
+    <Switch key={group?.id ?? "none"}>
       <Route path="/" component={DefaultGame} />
       <Route path="/last-man-standing" component={LastManStandingPage} />
       <Route path="/lms" component={LastManStandingPage} />

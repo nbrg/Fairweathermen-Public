@@ -58,4 +58,25 @@ test.describe("multi-group switching", () => {
     await expect(page.getByRole("link", { name: "Golf" })).toBeHidden();
     await expect(page.getByRole("link", { name: "Lawro" })).toBeVisible();
   });
+
+  test("switching keeps you on the same game tab when the new group offers it", async ({ page }) => {
+    await loginViaUi(page, CODES.alex);
+    // Both Demo League and Rovers play Lawro, so switching from the Lawro page
+    // should leave you on Lawro rather than bouncing to the landing route.
+    await page.goto("/lawro");
+    await page.getByTestId("group-switcher").click();
+    await page.getByRole("option", { name: "Rovers" }).click();
+    await expect(page).toHaveURL(/\/lawro$/);
+  });
+
+  test("switching leaves a game the new group lacks and lands on its primary game", async ({ page }) => {
+    await loginViaUi(page, CODES.alex);
+    // Golf is Demo-only; switching to Rovers (no golf) from the golf page must
+    // send you to the landing route, not keep you on a page Rovers doesn't have.
+    await page.goto("/golf");
+    await page.getByTestId("group-switcher").click();
+    await page.getByRole("option", { name: "Rovers" }).click();
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.getByRole("link", { name: "Golf" })).toBeHidden();
+  });
 });
