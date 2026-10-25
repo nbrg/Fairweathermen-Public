@@ -35,27 +35,57 @@ export async function generateUniqueLoginCode(): Promise<string> {
   throw new Error("Could not generate a unique login code after 20 attempts");
 }
 
-// The existing code for a person, identified by username. Someone in several
-// groups is the same person across rows (the app's multi-group convention:
-// "Alex" in city and in rovers are the same human), so all their rows share one
-// code. Returns any code already assigned to a row with this username, or null
-// if none has one yet.
+// The existing code for a person, identified by username — ONLY within the
+// original, hand-seeded groups (the ones without an invite link). There, a name
+// really does identify one person ("Alex" in city and in rovers are the same
+// human), so all their rows share one code. Self-service groups are excluded on
+// purpose: anyone on the internet can create or join one under any name, so a
+// name there proves nothing, and reusing a code by name would hand a stranger
+// someone else's login. Returns null if no original-group row with this name
+// has a code yet.
 export async function codeForUsername(username: string): Promise<string | null> {
   const { db } = await import("./db");
-  const { users } = await import("@shared/schema");
-  const { eq, and, isNotNull } = await import("drizzle-orm");
+  const { users, groups } = await import("@shared/schema");
+  const { eq, and, isNotNull, isNull, inArray } = await import("drizzle-orm");
+  const originalGroups = db.select({ id: groups.id }).from(groups).where(isNull(groups.inviteToken));
   const [row] = await db
     .select({ loginCode: users.loginCode })
     .from(users)
-    .where(and(eq(users.username, username), isNotNull(users.loginCode)));
+    .where(
+      and(
+        eq(users.username, username),
+        isNotNull(users.loginCode),
+        inArray(users.groupId, originalGroups),
+      ),
+    );
   return row?.loginCode ?? null;
 }
 
-// Resolve the code a user row should have: reuse the person's existing code if
-// any of their (same-username) rows already has one, otherwise mint a fresh
-// unique code.
+// Resolve the code a new row in an ORIGINAL group should have: reuse the
+// person's existing code if any of their (same-username) original-group rows
+// already has one, otherwise mint a fresh unique code. Never use this for a
+// self-service group or for an unauthenticated caller — see codeForUsername.
 export async function resolveLoginCodeForUsername(username: string): Promise<string> {
   return (await codeForUsername(username)) ?? (await generateUniqueLoginCode());
+}
+
+// The login code a self-service create/join should give its new row. If the
+// caller is already signed in (a verified cookie whose row still exists), the
+// new row joins their existing identity, so one code keeps covering all their
+// groups. Otherwise they're a new person and get a fresh code — never one found
+// by name.
+export async function codeForNewSelfServiceRow(signedInUserId: number | undefined): Promise<string> {
+  if (signedInUserId != null) {
+    const { db } = await import("./db");
+    const { users } = await import("@shared/schema");
+    const { eq } = await import("drizzle-orm");
+    const [me] = await db
+      .select({ loginCode: users.loginCode })
+      .from(users)
+      .where(eq(users.id, signedInUserId));
+    if (me?.loginCode) return me.loginCode;
+  }
+  return generateUniqueLoginCode();
 }
 
 // Idempotent boot-time backfill: assigns a login code to every user that
@@ -117,14 +147,19 @@ export async function unifyLoginCodesAcrossGroups(): Promise<void> {
   try {
     const { db } = await import("./db");
     const { users, groups } = await import("@shared/schema");
-    const { eq } = await import("drizzle-orm");
+    const { eq, isNull, inArray } = await import("drizzle-orm");
 
     const kprGroup = (await db.select({ id: groups.id }).from(groups).where(eq(groups.slug, "city")))[0];
     const kprGroupId = kprGroup?.id ?? null;
 
+    // Original groups only: in self-service groups two rows with the same name
+    // are usually two different people, and merging their codes would let one
+    // sign in as the other.
+    const originalGroups = db.select({ id: groups.id }).from(groups).where(isNull(groups.inviteToken));
     const rows = await db
       .select({ id: users.id, username: users.username, groupId: users.groupId, loginCode: users.loginCode })
-      .from(users);
+      .from(users)
+      .where(inArray(users.groupId, originalGroups));
 
     // Group rows by person (username).
     const byUsername = new Map<string, typeof rows>();

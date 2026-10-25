@@ -288,7 +288,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { db } = await import("./db");
       const { groups, users } = await import("@shared/schema");
       const { eq } = await import("drizzle-orm");
-      const { resolveLoginCodeForUsername } = await import("./loginCodes");
+      const { codeForNewSelfServiceRow } = await import("./loginCodes");
 
       const slug = await uniqueGroupSlug(groupName);
       const inviteToken = newInviteToken();
@@ -304,7 +304,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           username: adminName,
           password: "password",
           groupId: group.id,
-          loginCode: await resolveLoginCodeForUsername(adminName),
+          // Never looked up by name (that would hand anyone who types an
+          // existing player's name that player's login): a signed-in caller
+          // keeps their own code, anyone else gets a fresh one.
+          loginCode: await codeForNewSelfServiceRow(req.userId),
         })
         .returning();
       await db.update(groups).set({ ownerUserId: adminRow.id }).where(eq(groups.id, group.id));
@@ -351,9 +354,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // POST /api/group/join/:token — public. A player joins a group via its invite
-  // link. Body: { name }. Creates their player row + login code (or reuses an
-  // existing row/code), enrols them into any active LMS competition, logs them
-  // in, and returns their login code.
+  // link. Body: { name }. Creates their player row + login code, enrols them
+  // into any active LMS competition, logs them in, and returns their login code.
+  // A name already taken in the group is refused (unless the caller is signed in
+  // as that very player): handing back an existing player's code to anyone who
+  // types their name would let them sign in as that player. A caller who is
+  // already signed in elsewhere keeps their code, so the group joins their
+  // switcher.
   app.post("/api/group/join/:token", loginLimiter, async (req, res) => {
     try {
       const token = String(req.params.token ?? "");
@@ -365,17 +372,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const { db } = await import("./db");
       const { groups, users } = await import("@shared/schema");
-      const { and, eq } = await import("drizzle-orm");
-      const { resolveLoginCodeForUsername } = await import("./loginCodes");
+      const { and, eq, sql } = await import("drizzle-orm");
+      const { codeForNewSelfServiceRow } = await import("./loginCodes");
 
       const [group] = await db.select().from(groups).where(eq(groups.inviteToken, token));
       if (!group) return res.status(404).json({ error: "This invite link is invalid or has expired" });
 
+      // Names are matched case- and space-insensitively so "dave" can't sit
+      // alongside "Dave".
       const [existing] = await db
         .select()
         .from(users)
-        .where(and(eq(users.username, name), eq(users.groupId, group.id)));
+        .where(and(eq(users.groupId, group.id), sql`lower(trim(${users.username})) = ${name.toLowerCase()}`));
       let player = existing;
+      if (player) {
+        const me = req.userId != null ? await storage.getUser(req.userId) : undefined;
+        const isThem = !!me && !!me.loginCode && me.loginCode === player.loginCode;
+        if (!isThem) {
+          return res.status(409).json({
+            error: `Someone called "${player.username}" is already in ${group.name}. If that's you, sign in with your login code instead. Otherwise, add something to your name (like an initial).`,
+          });
+        }
+      }
+      const linked = req.userId != null;
       if (!player) {
         const [row] = await db
           .insert(users)
@@ -383,7 +402,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             username: name,
             password: "password",
             groupId: group.id,
-            loginCode: await resolveLoginCodeForUsername(name),
+            loginCode: await codeForNewSelfServiceRow(req.userId),
           })
           .returning();
         player = row;
@@ -404,7 +423,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const session = await buildSession(player.loginCode!, group.id);
       if (session) setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
       // `code`, not `loginCode`: the /api scrub middleware strips `loginCode`.
-      res.json({ ok: true, code: player.loginCode, group: session?.payload ?? null });
+      res.json({ ok: true, code: player.loginCode, linked, group: session?.payload ?? null });
     } catch (err: any) {
       console.error("[/api/group/join POST] error:", err);
       res.status(500).json({ error: err?.message || "Failed to join group" });
@@ -2553,15 +2572,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let player = existing[0];
       const createdUser = !player;
       if (!player) {
-        const { resolveLoginCodeForUsername } = await import("./loginCodes");
+        const { resolveLoginCodeForUsername, generateUniqueLoginCode } = await import("./loginCodes");
         const [row] = await db
           .insert(users)
           .values({
             username,
             password: "password",
             groupId,
-            // Reuse the person's code if they already belong to another group.
-            loginCode: await resolveLoginCodeForUsername(username),
+            // In an admin-created group, reuse the person's code if they already
+            // belong to another one. A self-service group's names don't identify
+            // anyone, so a new player there gets a fresh code.
+            loginCode: group.inviteToken
+              ? await generateUniqueLoginCode()
+              : await resolveLoginCodeForUsername(username),
           })
           .returning({
             id: users.id,
