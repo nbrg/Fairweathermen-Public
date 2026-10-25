@@ -10,7 +10,7 @@ export const groups = pgTable("groups", {
   slug: text("slug").notNull().unique(),
   name: text("name").notNull(),
   // Which games this group plays — restricts the visible nav tabs.
-  // Allowed values: "lms", "golf", "predictions" (the Prediction League,
+  // Allowed values: "lms", "predictions" (the Prediction League,
   // aka "Lawro" — predict the score of every PL match, one gameweek at a time).
   enabledGames: json("enabled_games").$type<string[]>().notNull().default([]),
   // Per-group rules, configurable from the admin "Groups" screen.
@@ -50,11 +50,11 @@ export const users = pgTable(
     // existing rows can be backfilled on boot; new users get one at creation.
     loginCode: text("login_code"),
     // Per-person game visibility override. NULL means "inherit the group's
-    // enabledGames" (the default — so e.g. everyone in City sees Golf whether or
-    // not they've played it). When set, it narrows the group's games for this
-    // one person: it's intersected with the group's enabledGames, so a player
-    // can be hidden from a game the group runs (e.g. a Rovers member who only
-    // plays LMS and shouldn't see the Golf tab) but never shown a game the
+    // enabledGames" (the default — so e.g. everyone in a group sees Lawro
+    // whether or not they've played it). When set, it narrows the group's games
+    // for this one person: it's intersected with the group's enabledGames, so a
+    // player can be hidden from a game the group runs (e.g. a member who only
+    // plays LMS and shouldn't see the Lawro tab) but never shown a game the
     // group doesn't offer. Managed per-player from /admin/players.
     enabledGames: json("enabled_games").$type<string[]>(),
   },
@@ -185,43 +185,6 @@ export const activityLogs = pgTable("activity_logs", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
-// Golf tables
-export const golfTournaments = pgTable("golf_tournaments", {
-  id: serial("id").primaryKey(),
-  groupId: integer("group_id").notNull().default(1),
-  name: text("name").notNull(),
-  courseId: text("course_id").notNull(), // e.g. "velvet-jacket-oxfordshire"
-  status: text("status").notNull().default("active"), // "active", "completed"
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-});
-
-export const golfScores = pgTable("golf_scores", {
-  id: serial("id").primaryKey(),
-  tournamentId: integer("tournament_id").notNull(),
-  playerName: text("player_name").notNull(),
-  hole: integer("hole").notNull(), // 1-18
-  day: integer("day").notNull(), // 1 or 2
-  score: integer("score"), // strokes for this hole
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
-
-export const golfHandicaps = pgTable("golf_handicaps", {
-  id: serial("id").primaryKey(),
-  tournamentSlug: text("tournament_slug").notNull(),
-  playerName: text("player_name").notNull(),
-  handicap: integer("handicap").notNull(),
-  lastUpdated: timestamp("last_updated").notNull().defaultNow(),
-});
-
-export const golfPrizeWinners = pgTable("golf_prize_winners", {
-  id: serial("id").primaryKey(),
-  tournamentId: integer("tournament_id").notNull(),
-  prizeKey: text("prize_key").notNull(), // e.g. "nearest-pin-1", "longest-drive-1", etc.
-  winnerName: text("winner_name").notNull(),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
 // Types for in-memory storage
 export type Group = typeof groups.$inferSelect;
 export type User = typeof users.$inferSelect;
@@ -237,10 +200,6 @@ export type LmsParticipant = typeof lmsParticipants.$inferSelect;
 export type LmsSelection = typeof lmsSelections.$inferSelect;
 export type LmsSelectionLog = typeof lmsSelectionLogs.$inferSelect;
 export type ActivityLog = typeof activityLogs.$inferSelect;
-export type GolfTournament = typeof golfTournaments.$inferSelect;
-export type GolfScore = typeof golfScores.$inferSelect;
-export type GolfHandicap = typeof golfHandicaps.$inferSelect;
-export type GolfPrizeWinner = typeof golfPrizeWinners.$inferSelect;
 export type MatchWithTeams = Match & {
   homeTeam: Team;
   awayTeam: Team;
@@ -305,28 +264,6 @@ export const insertActivityLogSchema = createInsertSchema(activityLogs).omit({
   createdAt: true,
 });
 
-export const insertGolfTournamentSchema = createInsertSchema(golfTournaments).omit({
-  id: true,
-  createdAt: true,
-});
-
-export const insertGolfScoreSchema = createInsertSchema(golfScores).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
-});
-
-export const insertGolfHandicapSchema = createInsertSchema(golfHandicaps).omit({
-  id: true,
-  lastUpdated: true,
-});
-
-export const insertGolfPrizeWinnerSchema = createInsertSchema(golfPrizeWinners).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
-});
-
 // Insert types
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type InsertTeam = z.infer<typeof insertTeamSchema>;
@@ -338,10 +275,6 @@ export type InsertLmsParticipant = z.infer<typeof insertLmsParticipantSchema>;
 export type InsertLmsSelection = z.infer<typeof insertLmsSelectionSchema>;
 export type InsertLmsSelectionLog = z.infer<typeof insertLmsSelectionLogSchema>;
 export type InsertActivityLog = z.infer<typeof insertActivityLogSchema>;
-export type InsertGolfTournament = z.infer<typeof insertGolfTournamentSchema>;
-export type InsertGolfScore = z.infer<typeof insertGolfScoreSchema>;
-export type InsertGolfHandicap = z.infer<typeof insertGolfHandicapSchema>;
-export type InsertGolfPrizeWinner = z.infer<typeof insertGolfPrizeWinnerSchema>;
 
 // Web-push subscriptions. One row per browser/device that opted into
 // reminders. Tied to the user row that was active when they subscribed; the

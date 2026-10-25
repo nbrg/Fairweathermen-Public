@@ -19,14 +19,11 @@ reuse logic.
 - **Last Man Standing** — you can't reuse a team, you can only edit your own
   pick, a valid pick for the open gameweek is accepted, and every tab
   (Live/History/Fixtures/Stats/Rules) opens.
-- **Golf** — the stableford scorecard renders, the Day 1/Day 2/Leaderboard/P/L
-  views switch, the course picker works, and the scores API does the
-  create-tournament / save / read-back round trip and upserts a hole.
 - **Groups** — self-service group creation with per-group rules, and switching
   the active group both over the API and through the header switcher.
 - **Navigation & help** — the right game tabs show up and load, the help page
   lists the live games, and unknown or removed routes (including the old World
-  Cup and season-predictions pages) 404.
+  Cup, Golf and season-predictions pages) 404.
 - **Admin** — the players, audit and activity screens stay locked without the
   admin key and load with it; the admin API endpoints reject a missing or wrong
   key.

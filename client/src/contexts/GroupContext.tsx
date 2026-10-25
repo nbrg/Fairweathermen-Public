@@ -104,7 +104,7 @@ export function GroupProvider({ children }: { children: ReactNode }) {
     }
     const data = (await res.json()) as Group;
     setGroup(data);
-    // All game data (LMS/golf/predictions) is group-scoped — clear the cache
+    // All game data (LMS/predictions) is group-scoped — clear the cache
     // so every query refetches for the newly-active group.
     queryClient.clear();
     return { ok: true as const };

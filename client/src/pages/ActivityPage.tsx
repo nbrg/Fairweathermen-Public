@@ -124,8 +124,6 @@ function prettifyPath(
       case "/last-man-standing":
       case "/lms":
         return "Last Man Standing";
-      case "/golf":
-        return "Golf";
       case "/lawro":
       case "/predictions":
         return "Lawro";

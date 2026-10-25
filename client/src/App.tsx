@@ -11,7 +11,6 @@ import AdminPage from "@/pages/AdminPage";
 import LastManStandingPage from "./pages/LastManStandingPage";
 import AdminPlayers from "@/pages/AdminPlayers";
 import AdminNotifications from "@/pages/AdminNotifications";
-import GolfPage from "@/pages/GolfPage";
 import GroupGate from "@/pages/GroupGate";
 import GroupSwitch from "@/pages/GroupSwitch";
 import AuditPage from "@/pages/AuditPage";
@@ -23,14 +22,13 @@ import { usePageTracking } from "@/hooks/usePageTracking";
 
 // The landing page (/) defaults to the group's primary game, in priority
 // order: Last Man Standing (the year-round game), then the Prediction League
-// ("Lawro"), then Golf. Keep this precedence in step with the highlight logic
-// in Header.tsx.
+// ("Lawro"). Keep this precedence in step with the highlight logic in
+// Header.tsx.
 function DefaultGame() {
   const { group } = useGroup();
-  const enabled = new Set(group?.enabledGames ?? ["lms", "golf", "predictions"]);
+  const enabled = new Set(group?.enabledGames ?? ["lms", "predictions"]);
   if (enabled.has("lms")) return <LastManStandingPage />;
-  if (enabled.has("predictions")) return <HomePage />;
-  return <GolfPage />;
+  return <HomePage />;
 }
 
 // Renders the Prediction League ("Lawro") page, but first makes sure the active
@@ -99,7 +97,6 @@ function Router() {
       <Route path="/lawro" component={LawroRoute} />
       {/* Legacy alias so old links / push notifications still work. */}
       <Route path="/predictions" component={LawroRoute} />
-      <Route path="/golf" component={GolfPage} />
       <Route path="/admin" component={AdminStats} />
       <Route path="/admin/players" component={AdminPlayers} />
       <Route path="/admin/notifications" component={AdminNotifications} />

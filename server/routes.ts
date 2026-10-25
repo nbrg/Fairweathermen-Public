@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { runScraper } from "./scraper";
-import { insertTeamSchema, insertMatchSchema, insertPredictionSchema, insertGolfTournamentSchema, insertGolfScoreSchema, insertGolfPrizeWinnerSchema, REMINDER_LEAD_PRESETS_MINUTES } from "@shared/schema";
+import { insertTeamSchema, insertMatchSchema, insertPredictionSchema, REMINDER_LEAD_PRESETS_MINUTES } from "@shared/schema";
 import { getVisitorStats, updateScreenResolution } from "./visitorTracker";
 import { getLocationFromIP, getRealIP } from "./geolocation";
 import { z } from "zod";
@@ -1725,188 +1725,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   console.log('Score scraper disabled - manual updates only');
 
-  // Golf tournament routes
-  
-  // GET /api/golf/tournaments - Get all golf tournaments
-  app.get("/api/golf/tournaments", async (req, res) => {
-    try {
-      const tournaments = await storage.getAllGolfTournaments();
-      res.json(tournaments);
-    } catch (error) {
-      console.error("Error fetching golf tournaments:", error);
-      res.status(500).json({ error: "Failed to fetch golf tournaments" });
-    }
-  });
-
-  // POST /api/golf/tournaments - Create a new golf tournament
-  app.post("/api/golf/tournaments", async (req, res) => {
-    try {
-      const tournamentData = insertGolfTournamentSchema.parse(req.body);
-      const tournament = await storage.createGolfTournament(tournamentData);
-      res.status(201).json(tournament);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      console.error("Error creating golf tournament:", error);
-      res.status(500).json({ error: "Failed to create golf tournament" });
-    }
-  });
-
-  // GET /api/golf/tournaments/:id/scores - Get all scores for a tournament
-  app.get("/api/golf/tournaments/:id/scores", async (req, res) => {
-    try {
-      const tournamentId = parseInt(req.params.id);
-      if (isNaN(tournamentId)) {
-        return res.status(400).json({ error: "Invalid tournament ID" });
-      }
-      
-      const scores = await storage.getGolfScoresByTournament(tournamentId);
-      res.json(scores);
-    } catch (error) {
-      console.error("Error fetching golf scores:", error);
-      res.status(500).json({ error: "Failed to fetch golf scores" });
-    }
-  });
-
-  // POST /api/golf/scores - Create or update a golf score
-  app.post("/api/golf/scores", async (req, res) => {
-    try {
-      const scoreData = insertGolfScoreSchema.parse(req.body);
-      
-      // Check if score already exists for this tournament/player/hole/day
-      const existingScores = await storage.getGolfScoresByTournamentAndPlayer(
-        scoreData.tournamentId,
-        scoreData.playerName
-      );
-      
-      const existingScore = existingScores.find(
-        s => s.hole === scoreData.hole && s.day === scoreData.day
-      );
-      
-      if (existingScore) {
-        // Update existing score
-        const updatedScore = await storage.updateGolfScore(existingScore.id, { score: scoreData.score });
-        res.json(updatedScore);
-      } else {
-        // Create new score
-        const newScore = await storage.createGolfScore(scoreData);
-        res.status(201).json(newScore);
-      }
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
-      }
-      console.error("Error saving golf score:", error);
-      res.status(500).json({ error: "Failed to save golf score" });
-    }
-  });
-
-  // DELETE /api/golf/scores - Delete a golf score
-  app.delete("/api/golf/scores", async (req, res) => {
-    try {
-      const { tournamentId, playerName, hole, day } = req.body;
-      
-      if (!tournamentId || !playerName || !hole || !day) {
-        return res.status(400).json({ error: "Missing required fields" });
-      }
-      
-      // Find and delete the score
-      const existingScores = await storage.getGolfScoresByTournamentAndPlayer(
-        tournamentId,
-        playerName
-      );
-      
-      const existingScore = existingScores.find(
-        s => s.hole === Number(hole) && s.day === Number(day)
-      );
-      
-      if (existingScore) {
-        await storage.deleteGolfScore(existingScore.id);
-        res.json({ success: true, message: "Score deleted successfully" });
-      } else {
-        res.json({ success: true, message: "Score not found, nothing to delete" });
-      }
-    } catch (error) {
-      console.error("Error deleting golf score:", error);
-      res.status(500).json({ error: "Failed to delete golf score" });
-    }
-  });
-
-  // Golf Prize Winner routes
-  
-  // GET /api/golf/tournaments/:id/prize-winners - Get all prize winners for a tournament
-  app.get("/api/golf/tournaments/:id/prize-winners", async (req, res) => {
-    try {
-      const tournamentId = parseInt(req.params.id);
-      if (isNaN(tournamentId)) {
-        return res.status(400).json({ error: "Invalid tournament ID" });
-      }
-      
-      const prizeWinners = await storage.getGolfPrizeWinnersByTournament(tournamentId);
-      res.json(prizeWinners);
-    } catch (error) {
-      console.error("Error fetching golf prize winners:", error);
-      res.status(500).json({ error: "Failed to fetch golf prize winners" });
-    }
-  });
-
-  // POST /api/golf/prize-winners - Set a prize winner (create or update)
-  app.post("/api/golf/prize-winners", async (req, res) => {
-    try {
-      const { tournamentId, prizeKey, winnerName } = req.body;
-      
-      if (!tournamentId || !prizeKey || winnerName === undefined) {
-        return res.status(400).json({ error: "Missing required fields: tournamentId, prizeKey, winnerName" });
-      }
-      
-      // Handle deletion when winnerName is empty
-      if (winnerName === '') {
-        const existing = await storage.getGolfPrizeWinnerByTournamentAndPrize(tournamentId, prizeKey);
-        if (existing) {
-          await storage.deleteGolfPrizeWinner(existing.id);
-          res.json({ deleted: true });
-        } else {
-          res.json({ deleted: false, message: "No existing record to delete" });
-        }
-        return;
-      }
-      
-      const prizeWinner = await storage.setGolfPrizeWinner(tournamentId, prizeKey, winnerName);
-      res.json(prizeWinner);
-    } catch (error) {
-      console.error("Error setting golf prize winner:", error);
-      res.status(500).json({ error: "Failed to set golf prize winner" });
-    }
-  });
-
-  // Golf Handicap routes
-
-  // GET /api/golf/handicaps/:tournamentSlug - Get handicaps for a tournament
-  app.get("/api/golf/handicaps/:tournamentSlug", async (req, res) => {
-    try {
-      const handicaps = await storage.getGolfHandicapsByTournament(req.params.tournamentSlug);
-      res.json(handicaps);
-    } catch (error) {
-      console.error("Error fetching golf handicaps:", error);
-      res.status(500).json({ error: "Failed to fetch golf handicaps" });
-    }
-  });
-
-  // POST /api/golf/handicaps/:tournamentSlug - Set handicap for a player in a tournament
-  app.post("/api/golf/handicaps/:tournamentSlug", async (req, res) => {
-    try {
-      const { playerName, handicap } = req.body;
-      if (!playerName || handicap === undefined) {
-        return res.status(400).json({ error: "Missing required fields: playerName, handicap" });
-      }
-      const result = await storage.setGolfHandicap(req.params.tournamentSlug, playerName, parseInt(handicap));
-      res.json(result);
-    } catch (error) {
-      console.error("Error setting golf handicap:", error);
-      res.status(500).json({ error: "Failed to set golf handicap" });
-    }
-  });
 
   // Import LMS processor
   const { lmsProcessor } = await import('./lmsProcessor');
@@ -2253,7 +2071,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // screen. All are gated by the admin API key (x-api-key), same as the other
   // /api/admin routes.
 
-  const ALLOWED_GAMES = ["lms", "golf", "predictions"] as const;
+  const ALLOWED_GAMES = ["lms", "predictions"] as const;
 
   function cleanGames(input: unknown): string[] {
     if (!Array.isArray(input)) return [];
@@ -2523,7 +2341,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Behaviour depends on the group's games:
   //  - LMS group: removes the player from the group's *current* (non-completed)
   //    Last Man Standing competition(s) only. Does NOT delete the user; past LMS
-  //    competitions and golf are untouched.
+  //    competitions are untouched.
   //  - Non-LMS group (e.g. a predictions-only "Lawro" group): takes the player
   //    out of THIS group entirely — deletes their group-scoped data (their
   //    predictions) and their user row for this group. Because a person has a
@@ -2594,8 +2412,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const message = removedFrom > 0
-        ? `Removed "${user.username}" from the current LMS competition. Past competitions and golf are unchanged.`
-        : `"${user.username}" wasn't in an active LMS competition — nothing to remove. Past competitions and golf are unchanged.`;
+        ? `Removed "${user.username}" from the current LMS competition. Past competitions are unchanged.`
+        : `"${user.username}" wasn't in an active LMS competition — nothing to remove. Past competitions are unchanged.`;
       res.json({ ok: true, removedFrom, player: { id: user.id, username: user.username }, message });
     } catch (err: any) {
       console.error("[admin/players DELETE] error:", err);

@@ -23,8 +23,6 @@ groups of friends. It hosts three games, each with its own pages/routes/tables:
 - **Last Man Standing (LMS)** — each gameweek a player picks one team to win; a wrong pick
   eliminates them, last player standing wins. Runs as competitions that span multiple seasons and
   groups. (tables: `lms_competitions`, `lms_participants`, `lms_selections`, `lms_selection_logs`)
-- **Golf** — track per-hole tournament scores with handicaps and record prize winners (e.g.
-  nearest-pin, longest-drive). (tables: `golf_*`)
 
 
 ## Commands
@@ -111,7 +109,6 @@ by area:
 - **Core/shared:** `groups`, `users` (group-scoped), `teams`, `matches`
 - **Prediction League:** `predictions`
 - **LMS:** `lms_competitions`, `lms_participants`, `lms_selections`, `lms_selection_logs`
-- **Golf:** `golf_tournaments`, `golf_scores`, `golf_handicaps`, `golf_prize_winners`
 - **Tracking/audit:** `activity_logs`, `visitors`
 - **Push reminders:** `push_subscriptions` (one row per opted-in device), `reminder_sends`
   (dedupe log so each person/game/gameweek reminder sends once)
