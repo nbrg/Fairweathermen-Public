@@ -11,7 +11,6 @@ One install hosts three separate games, each with its own pages and tables:
 - **Last Man Standing.** Each gameweek you pick one team to win. Get it wrong and
   you're out; last person standing takes the pot. Competitions can run across
   several seasons, and every pick change is logged.
-- **Golf.** Score golf days hole by hole with handicaps and match-play formats.
 
 Live scores and fixtures come from [football-data.org](https://www.football-data.org/).
 Eliminations, leaderboards and reminders all happen on their own in the
@@ -127,7 +126,7 @@ RDS) works for development and the tests. You can force either with
 The Playwright suite in [`tests/`](./tests) drives the real app against a
 throwaway Postgres database — no mocks. It covers login and the group model,
 the Lawro deadline-redaction rule and scoring, the Last Man Standing pick rules,
-the golf scorecard and its scores API, navigation and the help page, multi-group
+navigation and the help page, multi-group
 switching, self-service group creation, the admin pages, and a set of checks
 that no login code or password ever leaks through the API. Every spec runs
 across five browser profiles — desktop Chrome, Firefox and Safari plus mobile

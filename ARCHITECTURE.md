@@ -23,8 +23,6 @@ groups of friends. It hosts three games, each with its own pages/routes/tables:
 - **Last Man Standing (LMS)** — each gameweek a player picks one team to win; a wrong pick
   eliminates them, last player standing wins. Runs as competitions that span multiple seasons and
   groups. (tables: `lms_competitions`, `lms_participants`, `lms_selections`, `lms_selection_logs`)
-- **Golf** — track per-hole tournament scores with handicaps and record prize winners (e.g.
-  nearest-pin, longest-drive). (tables: `golf_*`)
 
 
 ## Commands
@@ -111,7 +109,6 @@ by area:
 - **Core/shared:** `groups`, `users` (group-scoped), `teams`, `matches`
 - **Prediction League:** `predictions`
 - **LMS:** `lms_competitions`, `lms_participants`, `lms_selections`, `lms_selection_logs`
-- **Golf:** `golf_tournaments`, `golf_scores`, `golf_handicaps`, `golf_prize_winners`
 - **Tracking/audit:** `activity_logs`, `visitors`
 - **Push reminders:** `push_subscriptions` (one row per opted-in device), `reminder_sends`
   (dedupe log so each person/game/gameweek reminder sends once)
@@ -150,8 +147,8 @@ Anyone can create their own group from the public pages (no admin key needed):
   its first player **and** its admin (`groups.ownerUserId`), mints an invite token, logs them in,
   and returns their login code + invite link. `GET /api/group/invite/:token` describes a group for
   the join page; `POST /api/group/join/:token` ({ name }) creates the joiner's player row + login
-  code and signs them in. Self-service groups may only run `lms` and `predictions` (golf needs
-  seeded data). Client pages: `/create`, `/join/:token` (both public — see `GatedShell`).
+  code and signs them in. Self-service groups may run `lms` and `predictions`. Client pages:
+  `/create`, `/join/:token` (both public — see `GatedShell`).
 - **Per-group rules** live on `groups.rules` (a partial `GroupRules`; NULL = defaults). Always read
   through `server/groupRules.ts`'s `getGroupRules(groupId)` so partial blobs merge onto
   `DEFAULT_GROUP_RULES` — every default reproduces the old hard-coded behaviour, so existing groups

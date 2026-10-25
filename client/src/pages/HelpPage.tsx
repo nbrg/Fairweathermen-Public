@@ -12,18 +12,13 @@ const PRIMARY_ROUTES: RouteRow[] = [
     path: "/",
     name: "Home",
     description:
-      "Default landing page once you've entered a group code — your group's primary game (Last Man Standing, else Lawro, else Golf).",
+      "Default landing page once you've entered a group code — your group's primary game (Last Man Standing, else Lawro).",
   },
   {
     path: "/last-man-standing",
     name: "Last Man Standing",
     description:
       "Live / History / Fixtures / Stats / Rules tabs for the Premier League knockout game. Aliased at /lms.",
-  },
-  {
-    path: "/golf",
-    name: "Golf",
-    description: "Golf scoring app (only shown for groups with Golf enabled).",
   },
   {
     path: "/lawro",

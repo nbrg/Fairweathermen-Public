@@ -973,6 +973,21 @@ type TendencyRow = {
   awayRealF: number | null;
 };
 
+// Round three shares (summing to 1) to whole percentages that sum to exactly
+// 100, using largest-remainder rounding, so stacked 100% bars all line up.
+function splitTo100(parts: [number, number, number]): [number, number, number] {
+  const raw = parts.map((p) => p * 100);
+  const out = raw.map(Math.floor);
+  const total = raw.reduce((a, b) => a + b, 0);
+  if (total === 0) return [0, 0, 0];
+  let left = 100 - out.reduce((a, b) => a + b, 0);
+  const order = raw.map((v, i) => ({ i, r: v - Math.floor(v) })).sort((a, b) => b.r - a.r);
+  for (let k = 0; left > 0 && k < order.length; k++, left--) out[order[k].i] += 1;
+  return [out[0], out[1], out[2]];
+}
+
+const ACTUAL_LABEL = "Actual";
+
 // On-brand chart colours (see index.css tokens).
 const TC = {
   purple: "hsl(var(--primary))",
@@ -1175,13 +1190,32 @@ function TendenciesTab({
     return out;
   }, [predictions]);
 
+  // Actual home win / draw / away win split across finished matches — shown as
+  // an "Actual" row atop the outcome-lean chart so every player's bar can be
+  // read against reality.
+  const realOutcome = useMemo(() => {
+    let n = 0, home = 0, draw = 0, away = 0;
+    for (const m of matches) {
+      if (isFinishedMatch(m) && m.homeScore != null && m.awayScore != null) {
+        n += 1;
+        if (m.homeScore > m.awayScore) home += 1;
+        else if (m.homeScore < m.awayScore) away += 1;
+        else draw += 1;
+      }
+    }
+    if (!n) return null;
+    const [Home, Draw, Away] = splitTo100([home / n, draw / n, away / n]);
+    return { Home, Draw, Away, n };
+  }, [matches]);
+
   // One entry per player (alphabetical) — consistent x-order across the charts.
   const perPlayer = useMemo(
     () => rows.map((r) => ({
       name: r.username,
-      Home: Math.round(r.homePct * 100),
-      Draw: Math.round(r.drawPct * 100),
-      Away: Math.round(r.awayPct * 100),
+      ...(() => {
+        const [Home, Draw, Away] = splitTo100([r.homePct, r.drawPct, r.awayPct]);
+        return { Home, Draw, Away };
+      })(),
       over: Math.round(r.over25Pct * 100),
       clean: Math.round(r.cleanSheetPct * 100),
       big: Math.round(r.bigWinPct * 100),
@@ -1189,6 +1223,14 @@ function TendenciesTab({
       drawRate: Math.round(r.drawPct * 100),
     })),
     [rows],
+  );
+
+  // Outcome-lean rows: the actual split (when any game has finished) on top.
+  const outcomeData = useMemo(
+    () => (realOutcome
+      ? [{ name: ACTUAL_LABEL, Home: realOutcome.Home, Draw: realOutcome.Draw, Away: realOutcome.Away }, ...perPlayer]
+      : perPlayer),
+    [realOutcome, perPlayer],
   );
 
   const goalsData = useMemo(
@@ -1248,10 +1290,27 @@ function TendenciesTab({
             {/* Outcome lean */}
             <div>
               <h3 className="mb-2 text-sm font-semibold text-gray-700">Outcome lean (Home / Draw / Away %)</h3>
-              <ResponsiveContainer width="100%" height={Math.max(180, perPlayer.length * 34)}>
-                <BarChart layout="vertical" data={perPlayer} margin={{ left: 8, right: 16 }}>
-                  <XAxis type="number" domain={[0, 100]} tickFormatter={(v: any) => `${v}%`} tick={{ fontSize: 11 }} />
-                  <YAxis type="category" dataKey="name" width={64} tick={{ fontSize: 11 }} />
+              <ResponsiveContainer width="100%" height={Math.max(180, outcomeData.length * 34)}>
+                <BarChart layout="vertical" data={outcomeData} margin={{ left: 8, right: 16 }}>
+                  <XAxis type="number" domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} allowDataOverflow tickFormatter={(v: any) => `${v}%`} tick={{ fontSize: 11 }} />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    width={64}
+                    tick={(props: any) => (
+                      <text
+                        x={props.x}
+                        y={props.y}
+                        dy={4}
+                        textAnchor="end"
+                        fontSize={11}
+                        fontWeight={props.payload.value === ACTUAL_LABEL ? 700 : 400}
+                        fill={props.payload.value === ACTUAL_LABEL ? "#111827" : "#666"}
+                      >
+                        {props.payload.value}
+                      </text>
+                    )}
+                  />
                   <RTooltip {...tt} formatter={pctTip} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
                   <Bar dataKey="Home" stackId="a" fill={TC.purple} />
@@ -1282,6 +1341,7 @@ function TendenciesTab({
                         stroke={TC.purple}
                         strokeDasharray="5 4"
                         strokeWidth={2}
+                        ifOverflow="extendDomain"
                         label={{ value: `Home actual ${realAvg.home.toFixed(2)}`, position: "right", fontSize: 10, fill: TC.purple }}
                       />
                     )}
@@ -1291,6 +1351,7 @@ function TendenciesTab({
                         stroke={TC.green}
                         strokeDasharray="5 4"
                         strokeWidth={2}
+                        ifOverflow="extendDomain"
                         label={{ value: `Away actual ${realAvg.away.toFixed(2)}`, position: "right", fontSize: 10, fill: TC.green }}
                       />
                     )}
@@ -1331,6 +1392,7 @@ function TendenciesTab({
                       stroke="#374151"
                       strokeDasharray="5 4"
                       strokeWidth={2}
+                      ifOverflow="extendDomain"
                       label={{ value: `Actual ${Math.round(realStyle[styleMetric])}%`, position: "right", fontSize: 10, fill: "#374151" }}
                     />
                   )}

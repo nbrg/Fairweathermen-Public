@@ -5,9 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 
-// The games a self-service group can choose to run. Golf depends on hand-seeded
-// real-world data, so it's not offered here (kept in step with SELF_SERVE_GAMES
-// on the server).
+// The games a self-service group can choose to run (kept in step with
+// SELF_SERVE_GAMES on the server).
 const GAME_OPTIONS: { key: string; label: string; blurb: string }[] = [
   { key: "lms", label: "Last Man Standing", blurb: "Pick one team to win each week; a wrong pick knocks you out." },
   { key: "predictions", label: "Lawro (score predictions)", blurb: "Predict every Premier League scoreline for points." },
