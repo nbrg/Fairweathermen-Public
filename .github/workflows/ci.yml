@@ -115,18 +115,30 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-${{ matrix.browser }}
 
-      # --with-deps / install-deps shell out to apt, so wait for the runner's
-      # boot-time apt job to release the dpkg lock before each attempt (it fails
-      # instantly, not with a hang, so a timeout alone won't catch it), and back
-      # off between tries. apt mirrors also occasionally stall for close to an
-      # hour, hence the 8-minute per-attempt timeout.
+      # Playwright's apt step below blocks on the dpkg lock, which the runner's
+      # boot-time unattended-upgrades can hold for many minutes — long enough to
+      # blow the job timeout. Wait up to a minute for it to clear on its own,
+      # then stop the upgrader and clear the lock so the install can proceed
+      # (runners are ephemeral, so reclaiming it is safe). Bounded so it can
+      # never hang the job.
+      - name: Free the apt lock
+        run: |
+          for i in $(seq 1 12); do
+            sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || exit 0
+            echo "apt lock held, waiting ($i/12)..."; sleep 5
+          done
+          echo "apt lock still held after 60s; stopping the background upgrader"
+          sudo timeout 30 systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          sudo pkill -9 -f unattended-upgrade 2>/dev/null || true
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock 2>/dev/null || true
+          sudo dpkg --configure -a 2>/dev/null || true
+
+      # apt mirrors occasionally stall for close to an hour; give up after
+      # 8 minutes and try again, backing off between attempts.
       - name: Install Playwright browser
         if: steps.pw-cache.outputs.cache-hit != 'true'
         run: |
           for attempt in 1 2 3; do
-            while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-              echo "Waiting for the apt lock to clear..."; sleep 5
-            done
             timeout 480 npx playwright install --with-deps ${{ matrix.browser }} && exit 0
             echo "Browser install attempt $attempt failed or timed out"
             sleep 15
@@ -137,9 +149,6 @@ jobs:
         if: steps.pw-cache.outputs.cache-hit == 'true'
         run: |
           for attempt in 1 2 3; do
-            while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-              echo "Waiting for the apt lock to clear..."; sleep 5
-            done
             timeout 480 npx playwright install-deps ${{ matrix.browser }} && exit 0
             echo "System deps install attempt $attempt failed or timed out"
             sleep 15
