@@ -268,6 +268,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return !!group && group.ownerUserId != null && group.ownerUserId === req.userId;
   }
 
+  // The player row `id` if it belongs to the caller's active group.
+  async function playerInActiveGroup(req: any, id: number) {
+    if (!Number.isInteger(id)) return undefined;
+    const player = await storage.getUser(id);
+    return player && player.groupId === req.groupId ? player : undefined;
+  }
+
+  // The group's current LMS competition and whether players can still be moved
+  // in or out of it: only until its first deadline, so nobody joins or leaves
+  // a competition that's already under way.
+  async function lmsRosterWindow(groupId: number) {
+    const competition = await storage.getCurrentLmsCompetition(groupId);
+    if (!competition) return { competition: undefined, open: false };
+    const rules = await getGroupRules(groupId);
+    const locked = await isGameweekLocked(competition.startGameweek, rules.lms.deadlineMinutesBeforeKickoff);
+    return { competition, open: !locked };
+  }
+
+  // Whether a player has any game history in this group. Players with history
+  // can't be removed (it would rewrite past leaderboards and LMS results).
+  async function playerHasHistory(userId: number): Promise<boolean> {
+    const { db } = await import("./db");
+    const { predictions, lmsParticipants, lmsSelections, lmsCompetitions } = await import("@shared/schema");
+    const { and, eq } = await import("drizzle-orm");
+    const [pred] = await db.select({ id: predictions.id }).from(predictions).where(eq(predictions.userId, userId)).limit(1);
+    if (pred) return true;
+    const [lmsPick] = await db
+      .select({ id: lmsSelections.id })
+      .from(lmsSelections)
+      .innerJoin(lmsParticipants, eq(lmsSelections.participantId, lmsParticipants.id))
+      .where(eq(lmsParticipants.userId, userId))
+      .limit(1);
+    if (lmsPick) return true;
+    const [pastComp] = await db
+      .select({ id: lmsParticipants.id })
+      .from(lmsParticipants)
+      .innerJoin(lmsCompetitions, eq(lmsParticipants.competitionId, lmsCompetitions.id))
+      .where(and(eq(lmsParticipants.userId, userId), eq(lmsCompetitions.status, "completed")))
+      .limit(1);
+    return !!pastComp;
+  }
+
   // POST /api/group/create — public. Anyone can create a group. Body:
   //   { groupName, adminName, games: string[] }
   // Creates the group, makes the caller its first player AND its admin (owner),
@@ -513,6 +555,261 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (err: any) {
       console.error("[/api/group/rules PUT] error:", err);
       res.status(500).json({ error: err?.message || "Failed to save rules" });
+    }
+  });
+
+  // ---- Group admin: player management (owner only, on /group-settings) ----
+
+  // GET /api/group/players — the active group's players for the admin.
+  app.get("/api/group/players", requireGroup, async (req, res) => {
+    try {
+      if (!(await isActiveGroupOwner(req))) {
+        return res.status(403).json({ error: "Only the group admin can manage players" });
+      }
+      const { db } = await import("./db");
+      const { groups, users } = await import("@shared/schema");
+      const { asc, eq } = await import("drizzle-orm");
+      const [group] = await db.select().from(groups).where(eq(groups.id, req.groupId!));
+      const rows = await db
+        .select({ id: users.id, username: users.username })
+        .from(users)
+        .where(eq(users.groupId, req.groupId!))
+        .orderBy(asc(users.username));
+      const plays = (game: string) => ((group?.enabledGames as string[]) ?? []).includes(game);
+      const { competition, open } = plays("lms")
+        ? await lmsRosterWindow(req.groupId!)
+        : { competition: undefined, open: false };
+      const inLms = new Set<number>();
+      if (competition) {
+        for (const p of await storage.getLmsParticipantsByCompetition(competition.id)) inLms.add(p.userId);
+      }
+      const players = await Promise.all(
+        rows.map(async (r) => {
+          const isOwner = r.id === group?.ownerUserId;
+          return {
+            id: r.id,
+            username: r.username,
+            isOwner,
+            inLms: inLms.has(r.id),
+            canRemove: !isOwner && !(await playerHasHistory(r.id)),
+          };
+        }),
+      );
+      res.json({
+        players,
+        // Names identify people in the original groups (the shared login across
+        // groups), so only self-service groups can rename.
+        canRename: !!group?.inviteToken,
+        lms: competition
+          ? { name: competition.name, startGameweek: competition.startGameweek, open }
+          : null,
+      });
+    } catch (err: any) {
+      console.error("[/api/group/players GET] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to load players" });
+    }
+  });
+
+  // PATCH /api/group/players/:id — rename a player. Body { username }.
+  // Self-service groups only; names stay unique within the group.
+  app.patch("/api/group/players/:id", requireGroup, async (req, res) => {
+    try {
+      if (!(await isActiveGroupOwner(req))) {
+        return res.status(403).json({ error: "Only the group admin can manage players" });
+      }
+      const player = await playerInActiveGroup(req, Number(req.params.id));
+      if (!player) return res.status(404).json({ error: "No such player in this group" });
+      const username = String(req.body?.username ?? "").trim();
+      if (username.length < 1 || username.length > 40) {
+        return res.status(400).json({ error: "Names must be 1–40 characters" });
+      }
+      const { db } = await import("./db");
+      const { groups, users } = await import("@shared/schema");
+      const { and, eq, ne, sql } = await import("drizzle-orm");
+      const [group] = await db.select().from(groups).where(eq(groups.id, req.groupId!));
+      if (!group?.inviteToken) {
+        return res.status(409).json({ error: "Players in this group can't be renamed here" });
+      }
+      const [clash] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(
+          and(
+            eq(users.groupId, req.groupId!),
+            ne(users.id, player.id),
+            sql`lower(trim(${users.username})) = ${username.toLowerCase()}`,
+          ),
+        );
+      if (clash) return res.status(409).json({ error: `There's already a "${username}" in this group` });
+      await db.update(users).set({ username }).where(eq(users.id, player.id));
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("[/api/group/players PATCH] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to rename player" });
+    }
+  });
+
+  // POST /api/group/players/:id/reset-code — give a player a new login code
+  // (e.g. they lost theirs, or it leaked) and show it to the admin once. The old
+  // code stops working. A person's code covers every group they're in, so the
+  // admin can only reset it when all of that person's groups are ones they
+  // admin; otherwise resetting it would hand them a login to someone else's
+  // group.
+  app.post("/api/group/players/:id/reset-code", requireGroup, async (req, res) => {
+    try {
+      if (!(await isActiveGroupOwner(req))) {
+        return res.status(403).json({ error: "Only the group admin can manage players" });
+      }
+      const player = await playerInActiveGroup(req, Number(req.params.id));
+      if (!player) return res.status(404).json({ error: "No such player in this group" });
+      const { db } = await import("./db");
+      const { groups, users } = await import("@shared/schema");
+      const { eq, inArray } = await import("drizzle-orm");
+      const me = await storage.getUser(req.userId!);
+      const personRows = player.loginCode
+        ? await db.select({ id: users.id, groupId: users.groupId }).from(users).where(eq(users.loginCode, player.loginCode))
+        : [{ id: player.id, groupId: player.groupId }];
+      const groupIds = Array.from(new Set(personRows.map((r) => r.groupId)));
+      const personGroups = await db
+        .select({ id: groups.id, ownerUserId: groups.ownerUserId })
+        .from(groups)
+        .where(inArray(groups.id, groupIds));
+      const ownerIds = personGroups.map((g) => g.ownerUserId).filter((id): id is number => id != null);
+      const owners = ownerIds.length
+        ? await db.select({ id: users.id, loginCode: users.loginCode }).from(users).where(inArray(users.id, ownerIds))
+        : [];
+      const adminsAll = personGroups.every((g) => {
+        const owner = owners.find((o) => o.id === g.ownerUserId);
+        return !!owner && !!me?.loginCode && owner.loginCode === me.loginCode;
+      });
+      if (!adminsAll) {
+        return res.status(409).json({
+          error: `${player.username} is also in a group you don't run, so their code can't be reset here.`,
+        });
+      }
+      const { generateUniqueLoginCode } = await import("./loginCodes");
+      const code = await generateUniqueLoginCode();
+      await db.update(users).set({ loginCode: code }).where(inArray(users.id, personRows.map((r) => r.id)));
+      const { logAuditEvent } = await import("./groupAuth");
+      await logAuditEvent(req, { type: "login_code_reset", userId: player.id, details: { by: req.userId } });
+      // Returned as `code` (not `loginCode`) so the /api redaction middleware
+      // doesn't strip it — the admin needs to pass it on.
+      res.json({ ok: true, code });
+    } catch (err: any) {
+      console.error("[/api/group/players reset-code] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to reset code" });
+    }
+  });
+
+  // PUT /api/group/players/:id/lms — put a player in or take them out of the
+  // group's current LMS competition. Body { inLms: boolean }. Only allowed
+  // before that competition's first deadline (e.g. someone sitting one out
+  // because of the buy-in). The next competition copies this one's players, so
+  // someone who sat out is added back the same way when it opens.
+  app.put("/api/group/players/:id/lms", requireGroup, async (req, res) => {
+    try {
+      if (!(await isActiveGroupOwner(req))) {
+        return res.status(403).json({ error: "Only the group admin can manage players" });
+      }
+      const player = await playerInActiveGroup(req, Number(req.params.id));
+      if (!player) return res.status(404).json({ error: "No such player in this group" });
+      const inLms = req.body?.inLms;
+      if (typeof inLms !== "boolean") return res.status(400).json({ error: "inLms must be true or false" });
+      const { competition, open } = await lmsRosterWindow(req.groupId!);
+      if (!competition) return res.status(409).json({ error: "There's no LMS competition to change" });
+      if (!open) {
+        return res.status(409).json({
+          error: `${competition.name} has already started, so its players are fixed. Make the change when the next one opens.`,
+        });
+      }
+      const participants = await storage.getLmsParticipantsByCompetition(competition.id);
+      const mine = participants.filter((p) => p.userId === player.id);
+      if (inLms && mine.length === 0) {
+        await storage.createLmsParticipant({
+          competitionId: competition.id,
+          userId: player.id,
+          isActive: "true",
+          eliminatedInRound: null,
+        });
+      } else if (!inLms && mine.length > 0) {
+        const { db } = await import("./db");
+        const { lmsParticipants, lmsSelections, lmsSelectionLogs } = await import("@shared/schema");
+        const { inArray } = await import("drizzle-orm");
+        const ids = mine.map((p) => p.id);
+        await db.delete(lmsSelections).where(inArray(lmsSelections.participantId, ids));
+        await db.delete(lmsSelectionLogs).where(inArray(lmsSelectionLogs.participantId, ids));
+        await db.delete(lmsParticipants).where(inArray(lmsParticipants.id, ids));
+      }
+      const { logAuditEvent } = await import("./groupAuth");
+      await logAuditEvent(req, {
+        type: inLms ? "lms_player_added" : "lms_player_sat_out",
+        userId: player.id,
+        details: { competitionId: competition.id, by: req.userId },
+      });
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("[/api/group/players lms PUT] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to update LMS players" });
+    }
+  });
+
+  // DELETE /api/group/players/:id — remove a player who has no game history
+  // (e.g. joined twice, or by mistake). Anyone with picks or past results stays,
+  // so leaderboards and LMS history never change under people.
+  app.delete("/api/group/players/:id", requireGroup, async (req, res) => {
+    try {
+      if (!(await isActiveGroupOwner(req))) {
+        return res.status(403).json({ error: "Only the group admin can manage players" });
+      }
+      const player = await playerInActiveGroup(req, Number(req.params.id));
+      if (!player) return res.status(404).json({ error: "No such player in this group" });
+      const { db } = await import("./db");
+      const { groups, users, activityLogs, lmsParticipants, pushSubscriptions, reminderSends } =
+        await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const [group] = await db.select().from(groups).where(eq(groups.id, req.groupId!));
+      if (group?.ownerUserId === player.id) return res.status(409).json({ error: "The admin can't be removed" });
+      if (await playerHasHistory(player.id)) {
+        return res.status(409).json({
+          error: `${player.username} has picks or results here, so they can't be removed. You can take them out of the next LMS competition instead.`,
+        });
+      }
+      await db.delete(lmsParticipants).where(eq(lmsParticipants.userId, player.id));
+      await db.delete(reminderSends).where(eq(reminderSends.userId, player.id));
+      await db.delete(pushSubscriptions).where(eq(pushSubscriptions.userId, player.id));
+      // activity_logs.user_id is a real FK → null it rather than block delete.
+      await db.update(activityLogs).set({ userId: null }).where(eq(activityLogs.userId, player.id));
+      await db.delete(users).where(eq(users.id, player.id));
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("[/api/group/players DELETE] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to remove player" });
+    }
+  });
+
+  // POST /api/group/invite/reset — replace the group's invite link (e.g. it was
+  // shared too widely). The old link stops working at once; players already in
+  // the group are unaffected. Only groups that have an invite link (the
+  // self-service ones) can reset it.
+  app.post("/api/group/invite/reset", requireGroup, async (req, res) => {
+    try {
+      if (!(await isActiveGroupOwner(req))) {
+        return res.status(403).json({ error: "Only the group admin can reset the invite link" });
+      }
+      const { db } = await import("./db");
+      const { groups } = await import("@shared/schema");
+      const { and, eq, isNotNull } = await import("drizzle-orm");
+      const inviteToken = newInviteToken();
+      const updated = await db
+        .update(groups)
+        .set({ inviteToken })
+        .where(and(eq(groups.id, req.groupId!), isNotNull(groups.inviteToken)))
+        .returning({ id: groups.id });
+      if (updated.length === 0) return res.status(409).json({ error: "This group has no invite link" });
+      res.json({ ok: true, inviteToken });
+    } catch (err: any) {
+      console.error("[/api/group/invite/reset] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to reset the invite link" });
     }
   });
 
