@@ -262,6 +262,16 @@ export const predictions = pgTable("predictions", {
   isAutoPick: boolean("is_auto_pick").notNull().default(false),
 });
 
+// Server-generated secrets, so they don't have to be set by hand. Holds the
+// group-cookie signing key (name "group_cookie_secret") when the
+// GROUP_COOKIE_SECRET env var isn't set — see server/groupAuth.ts. Never sent
+// to clients.
+export const appSecrets = pgTable("app_secrets", {
+  name: text("name").primaryKey(),
+  value: text("value").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
 export const visitors = pgTable("visitors", {
   id: serial("id").primaryKey(),
   ipAddress: text("ip_address").notNull(),
