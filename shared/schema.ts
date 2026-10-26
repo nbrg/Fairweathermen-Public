@@ -186,6 +186,65 @@ export function resolveGroupRules(stored: Partial<GroupRules> | null | undefined
   };
 }
 
+// One changed setting, already worded for players ("Points for an exact score",
+// 3 → 5). Built by describeRuleChanges and shown in the rule-change pop-up.
+export type RuleChangeItem = {
+  game: "lawro" | "lms";
+  key: string;
+  label: string;
+  from: string;
+  to: string;
+};
+
+// A log of every change a group's admin makes to its rules. Each row keeps the
+// rules before and after, plus a readable list of what changed, so (a) every
+// player gets a pop-up about changes they haven't seen (users.
+// last_seen_rule_change_id) and (b) Lawro rule changes are never retroactive:
+// a change applies from `lawroEffectiveSeason`/`lawroEffectiveGameweek` (the
+// first gameweek whose deadline hadn't passed when it was made), and earlier
+// gameweeks keep the rules in this row's `before` — see lawroRulesAt().
+export const groupRuleChanges = pgTable("group_rule_changes", {
+  id: serial("id").primaryKey(),
+  groupId: integer("group_id").notNull(),
+  changedByUserId: integer("changed_by_user_id"),
+  changedAt: timestamp("changed_at").notNull().defaultNow(),
+  before: json("before").$type<GroupRules>().notNull(),
+  after: json("after").$type<GroupRules>().notNull(),
+  changes: json("changes").$type<RuleChangeItem[]>().notNull(),
+  // Set only when the change touched Lawro rules.
+  lawroEffectiveSeason: text("lawro_effective_season"),
+  lawroEffectiveGameweek: integer("lawro_effective_gameweek"),
+});
+
+export type GroupRuleChange = typeof groupRuleChanges.$inferSelect;
+
+// The Lawro rules that govern one gameweek, given the group's current rules and
+// its rule-change log. A gameweek before a change's effective gameweek keeps
+// that change's `before` rules, so editing the rules never rescores (or
+// re-locks) a gameweek whose deadline had already passed. Seasons compare as
+// strings ("2025/2026" < "2026/2027"); a null season counts as the current one.
+export function lawroRulesAt(
+  current: GroupRules["lawro"],
+  changes: Pick<GroupRuleChange, "id" | "before" | "lawroEffectiveSeason" | "lawroEffectiveGameweek">[],
+  season: string | null | undefined,
+  gameweek: number | null | undefined,
+): GroupRules["lawro"] {
+  if (gameweek == null) return current;
+  let rules = current;
+  // Newest first: each change older than the target gameweek's rules unwinds.
+  const ordered = changes
+    .filter((c) => c.lawroEffectiveGameweek != null)
+    .sort((a, b) => b.id - a.id);
+  for (const c of ordered) {
+    const effSeason = c.lawroEffectiveSeason ?? "";
+    const s = season ?? effSeason;
+    const before = s < effSeason || (s === effSeason && gameweek < c.lawroEffectiveGameweek!);
+    if (!before) break;
+    rules = resolveGroupRules(c.before).lawro;
+  }
+  return rules;
+}
+
 export const users = pgTable(
   "users",
   {
@@ -212,6 +271,10 @@ export const users = pgTable(
     // plays LMS and shouldn't see the Lawro tab) but never shown a game the
     // group doesn't offer. Managed per-player from /admin/players.
     enabledGames: json("enabled_games").$type<string[]>(),
+    // The newest group_rule_changes id this player has acknowledged. Any rule
+    // change past this id pops up for them (see group_rule_changes); joiners
+    // start at the latest so they aren't shown changes made before they arrived.
+    lastSeenRuleChangeId: integer("last_seen_rule_change_id").notNull().default(0),
   },
   (table) => ({
     groupUsernameUnique: unique("users_group_id_username_unique").on(
