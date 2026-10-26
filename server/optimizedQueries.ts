@@ -117,13 +117,18 @@ export async function getOptimizedPredictionsWithMatches(groupId?: number): Prom
         // Score with the Lawro points in force for this match's gameweek, so an
         // admin's points change never rescores a gameweek already played.
         const gwRules = lawroRulesFor(match.season, match.gameweek);
-        const { points: predPoints, status } = calculatePoints(prediction, match, {
+        const { points: basePoints, status } = calculatePoints(prediction, match, {
           exact: gwRules.exactScorePoints,
           result: gwRules.correctResultPoints,
         });
+        // A Joker only counts in a gameweek played under the Joker rule; there
+        // it doubles whatever the pick scored.
+        const isJoker = prediction.isJoker && gwRules.jokerEnabled;
+        const predPoints = isJoker ? basePoints * 2 : basePoints;
 
         result.push({
           ...prediction,
+          isJoker,
           match: {
             ...match,
             homeTeam: teamsMap.get(match.homeTeamId)!,

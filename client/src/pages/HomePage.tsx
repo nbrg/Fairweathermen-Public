@@ -77,6 +77,19 @@ function MatchProgress({ match }: { match: Match }) {
   );
 }
 
+// Corner badge on a Joker pick (its points are doubled).
+function JokerMark() {
+  return (
+    <span
+      className="pointer-events-none absolute right-0.5 top-0.5 rounded-sm bg-amber-400 px-0.5 text-[8px] font-extrabold leading-[10px] text-amber-950"
+      title="Joker: points doubled"
+      aria-label="Joker"
+    >
+      2×
+    </span>
+  );
+}
+
 // Smart single-input score cell: type "2" → auto-inserts "2-", then type "1" → "2-1".
 // Everyone can see everyone's predictions; only the logged-in player's own cells
 // are editable, and only until the gameweek deadline.
@@ -89,7 +102,7 @@ function PredictionCell({
 }: {
   userId: number;
   matchId: number;
-  existingPrediction: { id: number; homeScore?: number; awayScore?: number; status?: string; isAutoPick?: boolean; hidden?: boolean } | undefined;
+  existingPrediction: { id: number; homeScore?: number; awayScore?: number; status?: string; isAutoPick?: boolean; isJoker?: boolean; hidden?: boolean } | undefined;
   isLocked: boolean;
   own: boolean;
 }) {
@@ -293,6 +306,9 @@ function PredictionCell({
     );
   }
 
+  const isJoker = !!existingPrediction?.isJoker;
+  const jokerCell = isJoker ? "relative bg-amber-50" : "";
+
   // Read-only badge once the deadline has passed (your own and everyone else's).
   if (isLocked) {
     if (!existingPrediction) {
@@ -304,17 +320,19 @@ function PredictionCell({
     }
     const status = existingPrediction.status || "not_started";
     return (
-      <td className="px-2 py-2 border text-center">
+      <td className={`px-2 py-2 border text-center ${jokerCell}`}>
         <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${getStatusColor(status)}`}>
           {existingPrediction.homeScore}-{existingPrediction.awayScore}
         </span>
+        {isJoker && <JokerMark />}
       </td>
     );
   }
 
   // Your own cell before the deadline: editable.
   return (
-    <td className="px-1 py-1.5 border text-center">
+    <td className={`px-1 py-1.5 border text-center ${jokerCell}`}>
+      {isJoker && <JokerMark />}
       <input
         ref={inputRef}
         type="text"
@@ -384,6 +402,114 @@ function DeadlineCountdown({ deadline }: { deadline: Date | null }) {
 
 type Player = { id: number; username: string };
 
+type JokerPick = { match: Match; pred: Prediction; locked: boolean };
+
+function matchLabel(m: Match): string {
+  return `${m.homeTeam?.shortName || m.homeTeam?.name} vs ${m.awayTeam?.shortName || m.awayTeam?.name}`;
+}
+
+// The Joker strip above the fixtures grid: one dropdown of the player's own
+// predictions this gameweek, and the chosen one scores double. You can move it
+// while the gameweek is still open (the server enforces the same); after the
+// deadline it just says which pick is your Joker.
+function JokerPicker({
+  enabled,
+  picks,
+  canStillPredict,
+}: {
+  enabled: boolean;
+  picks: JokerPick[];
+  canStillPredict: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const current = picks.find((p) => p.pred.isJoker);
+  const [pending, setPending] = useState<number | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+
+  // Gameweeks played without the rule have no Joker to show.
+  if (!enabled && !current) return null;
+
+  const options = picks.filter((p) => !p.locked);
+  const canChange = enabled && (!current || !current.locked) && options.length > 0;
+  const selectedId = pending !== undefined ? pending : current?.pred.id ?? null;
+
+  async function choose(value: string) {
+    const nextId = value === "" ? null : Number(value);
+    const targetId = nextId ?? current?.pred.id;
+    if (targetId == null || nextId === (current?.pred.id ?? null)) return;
+    setPending(nextId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/predictions/${targetId}/joker`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ joker: nextId != null }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data?.error || "Couldn't save your Joker. Try again.");
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/predictions"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] }),
+      ]);
+    } catch {
+      setError("Couldn't save your Joker. Try again.");
+    } finally {
+      setPending(undefined);
+    }
+  }
+
+  const describe = (p: JokerPick) => `${matchLabel(p.match)} (${p.pred.homeScore}-${p.pred.awayScore})`;
+
+  let body: JSX.Element;
+  if (canChange) {
+    body = (
+      <select
+        aria-label="Choose your Joker"
+        value={selectedId == null ? "" : String(selectedId)}
+        onChange={(e) => choose(e.target.value)}
+        disabled={pending !== undefined}
+        className={`h-10 w-full rounded-lg border bg-white px-3 text-base sm:w-72 sm:text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-60 ${
+          selectedId == null ? "border-amber-400" : "border-gray-300"
+        }`}
+      >
+        <option value="">{current ? "No Joker" : "Choose a match…"}</option>
+        {options.map((p) => (
+          <option key={p.pred.id} value={p.pred.id}>
+            {describe(p)}
+          </option>
+        ))}
+      </select>
+    );
+  } else if (current) {
+    body = <span className="text-sm font-semibold text-gray-800">{describe(current)}</span>;
+  } else if (enabled && canStillPredict) {
+    body = <span className="text-sm text-gray-600">Make a prediction, then pick one as your Joker.</span>;
+  } else {
+    body = <span className="text-sm text-gray-500">No Joker this week.</span>;
+  }
+
+  return (
+    <div className="border-b border-amber-200 bg-amber-50 px-4 py-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <span className="rounded bg-amber-400 px-1.5 py-0.5 text-xs font-extrabold text-amber-950">2×</span>
+          <div>
+            <p className="text-sm font-semibold text-gray-900">Your Joker</p>
+            <p className="text-xs text-gray-600">
+              {canChange && !current ? "Pick one prediction to score double this week." : "Its points count double."}
+            </p>
+          </div>
+        </div>
+        {body}
+      </div>
+      {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
+    </div>
+  );
+}
+
 // ---------- Predictions tab: the fixtures grid + gameweek nav + countdown ----------
 function PredictionsTab({
   matches,
@@ -392,6 +518,7 @@ function PredictionsTab({
   availableGameweeks,
   currentGameweek,
   userId,
+  jokerEnabled = false,
 }: {
   matches: Match[];
   predictions: Prediction[];
@@ -399,6 +526,8 @@ function PredictionsTab({
   availableGameweeks: number[];
   currentGameweek: number;
   userId: number | undefined;
+  // The group's Joker rule: each player doubles the points of one pick a week.
+  jokerEnabled?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [selectedGw, setSelectedGw] = useState<number | null>(null);
@@ -487,6 +616,19 @@ function PredictionsTab({
         </div>
       </div>
 
+      {gwMatches.length > 0 && userId != null && (
+        <JokerPicker
+          key={gameweek}
+          enabled={jokerEnabled}
+          picks={matchPredictions.flatMap(({ match, userPredictions }) => {
+            const pred = userPredictions.get(userId);
+            if (!pred || typeof pred.homeScore !== "number" || typeof pred.awayScore !== "number") return [];
+            return [{ match, pred, locked: isLocked }];
+          })}
+          canStillPredict={!isLocked}
+        />
+      )}
+
       {gwMatches.length === 0 ? (
         <p className="p-4 text-sm text-gray-500">No fixtures for this gameweek yet.</p>
       ) : (
@@ -550,19 +692,24 @@ function PredictionsTab({
 export type LawroPoints = { exact: number; result: number };
 const DEFAULT_LAWRO_POINTS: LawroPoints = { exact: 3, result: 1 };
 
+// Points a single prediction scored. Prefer the server-sent value (`points`),
+// which already reflects the gameweek's rules and any Joker doubling; fall back
+// to the status + the group's points only when the server didn't send a number.
+function predictionPoints(p: Prediction, points: LawroPoints = DEFAULT_LAWRO_POINTS): number {
+  if (p.status !== "exact_score" && p.status !== "correct_result") return 0;
+  if (typeof p.points === "number") return p.points;
+  return p.status === "exact_score" ? points.exact : points.result;
+}
+
 // Points a player scored on a set of predictions (already filtered to a scope).
 function tallyPoints(preds: Prediction[], points: LawroPoints = DEFAULT_LAWRO_POINTS) {
   let exactScores = 0;
   let correctResults = 0;
   let totalPoints = 0;
   for (const p of preds) {
-    if (p.status === "exact_score") {
-      exactScores += 1;
-      totalPoints += points.exact;
-    } else if (p.status === "correct_result") {
-      correctResults += 1;
-      totalPoints += points.result;
-    }
+    if (p.status === "exact_score") exactScores += 1;
+    else if (p.status === "correct_result") correctResults += 1;
+    totalPoints += predictionPoints(p, points);
   }
   return { exactScores, correctResults, totalPoints };
 }
@@ -815,8 +962,8 @@ function StatsTab({
       s.finished += 1;
       let pts = 0;
       let gotExact = false;
-      if (pred.status === "exact_score") { s.exact += 1; pts = points.exact; gotExact = true; }
-      else if (pred.status === "correct_result") { s.correct += 1; pts = points.result; }
+      if (pred.status === "exact_score") { s.exact += 1; pts = predictionPoints(pred, points); gotExact = true; }
+      else if (pred.status === "correct_result") { s.correct += 1; pts = predictionPoints(pred, points); }
       s.points += pts;
       if (completedSet.has(gw)) {
         s.perGw.set(gw, (s.perGw.get(gw) ?? 0) + pts);
@@ -1091,7 +1238,7 @@ function TendenciesTab({
     for (const pred of predictions) {
       const gw = matchGw.get(pred.matchId);
       if (gw == null || !completedSet.has(gw)) continue;
-      const pts = pred.status === "exact_score" ? points.exact : pred.status === "correct_result" ? points.result : 0;
+      const pts = predictionPoints(pred, points);
       const um = perUser.get(pred.userId);
       if (!um) continue;
       um.set(gw, (um.get(gw) ?? 0) + pts);
@@ -1589,6 +1736,7 @@ export function PredictionsPage() {
                 availableGameweeks={availableGameweeks}
                 currentGameweek={currentGameweek}
                 userId={user?.id}
+                jokerEnabled={group?.rules?.lawro.jokerEnabled ?? false}
               />
             </TabsContent>
 

@@ -1959,6 +1959,73 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // PUT /api/predictions/:id/joker - Make this prediction the caller's Joker
+  // for its gameweek ({ joker: true }), or take the Joker off it ({ joker:
+  // false }). Only under the Lawro Joker rule, and only while the gameweek is
+  // still open (before the deadline), so the Joker can't be shifted onto a
+  // match once the result is being played out.
+  app.put("/api/predictions/:id/joker", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const joker = req.body?.joker;
+      if (typeof joker !== "boolean") {
+        return res.status(400).json({ error: "joker must be true or false" });
+      }
+
+      const existing = await storage.getPrediction(id);
+      if (!existing) {
+        return res.status(404).json({ error: "Prediction not found" });
+      }
+      if (existing.userId !== req.userId) {
+        return res.status(403).json({ error: "You can only edit your own predictions" });
+      }
+      if (
+        req.userId == null ||
+        req.groupId == null ||
+        !(await userGameEnabled(req.userId, req.groupId, "predictions"))
+      ) {
+        return res
+          .status(403)
+          .json({ error: "The Prediction League is not enabled for your current group" });
+      }
+
+      const match = await storage.getMatch(existing.matchId);
+      if (!match || match.gameweek == null) {
+        return res.status(404).json({ error: "Match not found" });
+      }
+      // The Joker is only available when the rule was on for this gameweek.
+      const { getLawroRulesResolver } = await import("./groupRules");
+      const rules = (await getLawroRulesResolver(req.groupId))(match.season, match.gameweek);
+      if (!rules.jokerEnabled) {
+        return res.status(400).json({ error: "The Joker isn't on for this gameweek" });
+      }
+
+      // The whole gameweek locks together at its deadline, so once this match is
+      // locked the Joker can neither move onto it nor off any pick in the week.
+      if (await gameweekLocked(match.gameweek, req.groupId)) {
+        return res.status(403).json({ error: "That match is locked, so your Joker can't change" });
+      }
+
+      // Setting a new Joker clears any the player already has elsewhere in the
+      // gameweek, so pass the gameweek's match ids for the server to scope that.
+      const gwMatches = (await storage.getMatchesByGameweek(match.gameweek)).filter(
+        (m) => (m.season ?? null) === (match.season ?? null),
+      );
+      const gwMatchIds = gwMatches.map((m) => m.id);
+
+      await storage.setPredictionJoker(req.userId, id, joker, gwMatchIds);
+      const { logAuditEvent } = await import("./groupAuth");
+      await logAuditEvent(req, {
+        type: "prediction_joker",
+        userId: existing.userId,
+        details: { matchId: existing.matchId, joker },
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to set the Joker" });
+    }
+  });
+
   // Last Man Standing API routes
   
   // GET /api/lms/current-competition - Get current active competition with participants and selections
