@@ -349,12 +349,27 @@ class AutoLmsProcessor {
     cron.schedule('0 */6 * * *', async () => {
       await this.refreshUpcomingFixtureTimes();
       invalidatePlSchedule();
+      // New-season sweep: once a new season's fixtures are imported, open each
+      // LMS group's GW1 competition (and heal any group left without one).
+      await this.ensureLmsCompetitions();
     });
 
     // Also run immediately on startup
     this.checkAndProcess();
     this.syncLiveMatches();
     this.refreshUpcomingFixtureTimes();
+    this.ensureLmsCompetitions();
+  }
+
+  // Make sure every LMS group has a competition running, opening one where it's
+  // due. Safe to call repeatedly; it no-ops for groups that already have one.
+  private async ensureLmsCompetitions(): Promise<void> {
+    try {
+      const { ensureLmsCompetitions } = await import('./lmsAutoStart');
+      await ensureLmsCompetitions();
+    } catch (err) {
+      console.error('[Auto] LMS auto-start sweep failed:', err);
+    }
   }
 }
 

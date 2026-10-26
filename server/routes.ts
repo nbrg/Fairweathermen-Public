@@ -361,6 +361,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .returning();
       await db.update(groups).set({ ownerUserId: adminRow.id }).where(eq(groups.id, group.id));
 
+      // If the group plays LMS, open its first competition now (at the next
+      // gameweek that hasn't kicked off). Best-effort: a failure here must not
+      // stop the group being created.
+      try {
+        const { ensureLmsCompetitionForGroup } = await import("./lmsAutoStart");
+        await ensureLmsCompetitionForGroup(group.id);
+      } catch (err) {
+        console.error(`[/api/group/create] couldn't auto-start LMS for group ${group.id}:`, err);
+      }
+
       const session = await buildSession(adminRow.loginCode!, group.id);
       if (session) setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
 
