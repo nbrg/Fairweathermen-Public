@@ -152,6 +152,85 @@ export function requireGroup(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+// ---- Anonymous visitor id (growth tracking) ----
+//
+// A random, unsigned first-party id ("fwm_vid") given to every browser on its
+// first real page load, so /admin/growth can count genuinely new visitors and
+// tie their later steps (opened an invite, created/joined a group, logged in)
+// back to that first visit. It identifies a browser, not a person, and grants
+// nothing — it's only ever written to activity_logs details.
+const VISITOR_COOKIE = "fwm_vid";
+const VISITOR_MAX_AGE_MS = 2 * 365 * 24 * 60 * 60 * 1000; // 2 years
+
+export function readVisitorId(req: Request): string | null {
+  const header = req.headers.cookie ?? "";
+  for (const part of header.split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed.startsWith(`${VISITOR_COOKIE}=`)) continue;
+    const value = decodeURIComponent(trimmed.slice(VISITOR_COOKIE.length + 1));
+    return /^[A-Za-z0-9_-]{8,64}$/.test(value) ? value : null;
+  }
+  return null;
+}
+
+// Returns this browser's visitor id, minting (and setting) one if it has none.
+// `isNew` is true only when we just minted it.
+export function ensureVisitorId(req: Request, res: Response): { vid: string; isNew: boolean } {
+  const existing = readVisitorId(req);
+  if (existing) return { vid: existing, isNew: false };
+  const vid = crypto.randomBytes(12).toString("base64url");
+  res.cookie(VISITOR_COOKIE, vid, {
+    httpOnly: true,
+    sameSite: "lax",
+    maxAge: VISITOR_MAX_AGE_MS,
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+  });
+  return { vid, isNew: true };
+}
+
+// Crawlers and link-preview fetchers (WhatsApp/iMessage/Slack unfurling an
+// invite link, etc.) never keep cookies, so without this every unfurl would
+// count as a "new visitor".
+export function isBotUserAgent(ua: string | null | undefined): boolean {
+  if (!ua) return true;
+  return /bot|crawl|spider|slurp|preview|facebookexternalhit|whatsapp|slack|telegram|discord|skype|linkedin|embedly|headless|lighthouse|curl|wget|python-requests|node-fetch|axios/i.test(
+    ua,
+  );
+}
+
+// Growth/onboarding event (new_visitor, invite_opened, group_created,
+// group_joined, login, login_failed) for /admin/growth. Unlike logAuditEvent,
+// the caller passes the userId/groupId explicitly — on create/join/login the
+// request's cookie is from *before* the action (often none at all). The
+// browser's visitor id is added to details automatically.
+export async function logGrowthEvent(
+  req: Request,
+  type: string,
+  options: { userId?: number | null; groupId?: number | null; details?: Record<string, any> } = {},
+) {
+  try {
+    const { storage } = await import("./storage");
+    const { getRealIP, getLocationFromIP } = await import("./geolocation");
+    const realIP = getRealIP(req);
+    const location = getLocationFromIP(realIP);
+    await storage.createActivityLog({
+      type,
+      userId: options.userId ?? null,
+      ipAddress: realIP,
+      userAgent: req.get("User-Agent") || null,
+      city: location.city,
+      country: location.country,
+      path: req.path,
+      details: JSON.stringify({ vid: readVisitorId(req), ...(options.details ?? {}) }),
+      groupId: options.groupId ?? null,
+    } as any);
+  } catch (err) {
+    // Tracking failures must never block the action that triggered them.
+    console.error(`[logGrowthEvent] failed to record ${type}:`, err);
+  }
+}
+
 // Writes an entry to activity_logs with the caller's IP, geolocation and
 // user agent. Used to record every pick/change for the /audit view.
 // userId here is the user whose pick was changed (NOT the caller — the

@@ -17,6 +17,7 @@ import CreateGroup from "@/pages/CreateGroup";
 import JoinGroup from "@/pages/JoinGroup";
 import GroupSettings from "@/pages/GroupSettings";
 import AuditPage from "@/pages/AuditPage";
+import GrowthPage from "@/pages/GrowthPage";
 import ActivityPage from "@/pages/ActivityPage";
 import HelpPage from "@/pages/HelpPage";
 import { GroupProvider, useGroup } from "@/contexts/GroupContext";
@@ -113,6 +114,7 @@ function Router() {
       <Route path="/admin/notifications" component={AdminNotifications} />
       <Route path="/lms-admin" component={AdminPage} />
       <Route path="/audit" component={AuditPage} />
+      <Route path="/admin/growth" component={GrowthPage} />
       <Route path="/activity" component={ActivityPage} />
       <Route path="/help" component={HelpPage} />
       {/* Fallback to 404 */}
