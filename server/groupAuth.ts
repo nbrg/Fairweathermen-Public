@@ -1,19 +1,53 @@
 import crypto from "crypto";
 import type { Request, Response, NextFunction } from "express";
 
-// HMAC signing secret. In production, set GROUP_COOKIE_SECRET in env. Falls
-// back to ADMIN_API_KEY (already set for admin endpoints) so existing
-// deployments don't need a new env var to start working. Last-resort dev
-// constant is announced loudly so it's hard to miss in logs.
-const SECRET =
-  process.env.GROUP_COOKIE_SECRET ||
-  process.env.ADMIN_API_KEY ||
-  (() => {
-    console.warn(
-      "[groupAuth] No GROUP_COOKIE_SECRET / ADMIN_API_KEY set — using insecure dev default",
-    );
-    return "fwm-dev-fallback-set-GROUP_COOKIE_SECRET-in-prod";
-  })();
+// HMAC signing secret for the session cookie. Nobody has to set anything:
+// GROUP_COOKIE_SECRET wins if it's set, otherwise the server generates a
+// random secret once and keeps it in the app_secrets table. Cookies signed
+// with an older key (the admin key, which used to be the fallback, or the
+// stored secret after GROUP_COOKIE_SECRET is set) are still accepted and
+// quietly re-signed with the current key on the next request, so changing the
+// key never signs anyone out. initCookieSecret() must run before any request.
+const DEV_FALLBACK_SECRET = "fwm-dev-fallback-set-GROUP_COOKIE_SECRET-in-prod";
+const SECRET_NAME = "group_cookie_secret";
+let SECRET = "";
+let LEGACY_SECRETS: string[] = [];
+
+async function storedCookieSecret(): Promise<string | null> {
+  try {
+    const { db } = await import("./db");
+    const { appSecrets } = await import("@shared/schema");
+    const { eq } = await import("drizzle-orm");
+    await db
+      .insert(appSecrets)
+      .values({ name: SECRET_NAME, value: crypto.randomBytes(32).toString("base64url") })
+      .onConflictDoNothing();
+    // Re-read rather than trusting our insert, in case another boot won the race.
+    const [row] = await db.select().from(appSecrets).where(eq(appSecrets.name, SECRET_NAME));
+    return row?.value ?? null;
+  } catch (err) {
+    console.warn("[groupAuth] Couldn't read/store the cookie secret (run npm run db:push?):", err);
+    return null;
+  }
+}
+
+export async function initCookieSecret(): Promise<void> {
+  const env = process.env.GROUP_COOKIE_SECRET || null;
+  const stored = await storedCookieSecret();
+  const admin = process.env.ADMIN_API_KEY || null;
+  const isProd = process.env.NODE_ENV === "production";
+  const primary = env ?? stored ?? admin ?? (isProd ? null : DEV_FALLBACK_SECRET);
+  if (!primary) {
+    throw new Error("[groupAuth] No cookie secret: set GROUP_COOKIE_SECRET or make the app_secrets table available");
+  }
+  if (!env && !stored) {
+    console.warn("[groupAuth] Signing cookies with a fallback secret — the app_secrets table isn't available");
+  }
+  SECRET = primary;
+  // The public dev string is never trusted in production.
+  const legacy = [stored, admin, isProd ? null : DEV_FALLBACK_SECRET];
+  LEGACY_SECRETS = legacy.filter((k): k is string => !!k && k !== primary);
+}
 
 // Cookie name bumped from the old group-only "fwm_group" to "fwm_user" now
 // that the payload identifies a specific user (not just a group). Old
@@ -23,22 +57,30 @@ const COOKIE_NAME = "fwm_user";
 const MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000; // 1 year
 
 function sign(value: string): string {
+  if (!SECRET) throw new Error("[groupAuth] initCookieSecret() hasn't run");
   const sig = crypto.createHmac("sha256", SECRET).update(value).digest("base64url");
   return `${value}.${sig}`;
 }
 
-function verify(signed: string): string | null {
+function signatureMatches(value: string, sig: string, secret: string): boolean {
+  const expected = crypto.createHmac("sha256", secret).update(value).digest("base64url");
+  // Constant-time compare to avoid leaking signature info via timing.
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// Returns the signed value, and whether it was signed with an older key (so
+// the caller can re-sign it).
+function verify(signed: string): { value: string; legacy: boolean } | null {
+  if (!SECRET) return null;
   const lastDot = signed.lastIndexOf(".");
   if (lastDot === -1) return null;
   const value = signed.slice(0, lastDot);
   const sig = signed.slice(lastDot + 1);
-  const expected = crypto.createHmac("sha256", SECRET).update(value).digest("base64url");
-  // Constant-time compare to avoid leaking signature info via timing.
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return null;
-  if (!crypto.timingSafeEqual(a, b)) return null;
-  return value;
+  if (signatureMatches(value, sig, SECRET)) return { value, legacy: false };
+  if (LEGACY_SECRETS.some((k) => signatureMatches(value, sig, k))) return { value, legacy: true };
+  return null;
 }
 
 // Sets the signed session cookie identifying the logged-in user. The payload
@@ -59,7 +101,9 @@ export function clearUserCookie(res: Response) {
   res.clearCookie(COOKIE_NAME, { path: "/" });
 }
 
-function readUserCookie(req: Request): { userId: number; groupId: number } | null {
+function readUserCookie(
+  req: Request,
+): { userId: number; groupId: number; legacy: boolean } | null {
   const header = req.headers.cookie ?? "";
   for (const part of header.split(";")) {
     const trimmed = part.trim();
@@ -70,11 +114,11 @@ function readUserCookie(req: Request): { userId: number; groupId: number } | nul
     const value = decodeURIComponent(trimmed.slice(eqIdx + 1));
     const verified = verify(value);
     if (!verified) return null;
-    const [userStr, groupStr] = verified.split(":");
+    const [userStr, groupStr] = verified.value.split(":");
     const userId = Number(userStr);
     const groupId = Number(groupStr);
     if (!Number.isFinite(userId) || !Number.isFinite(groupId)) return null;
-    return { userId, groupId };
+    return { userId, groupId, legacy: verified.legacy };
   }
   return null;
 }
@@ -92,10 +136,13 @@ declare global {
 
 // Always run as middleware: populates req.userId and req.groupId from the
 // cookie if present. Does NOT gate the request — that's requireGroup's job.
-export function groupContext(req: Request, _res: Response, next: NextFunction) {
+export function groupContext(req: Request, res: Response, next: NextFunction) {
   const session = readUserCookie(req);
   req.userId = session?.userId;
   req.groupId = session?.groupId;
+  // Signed with an older key: swap in a cookie signed with the current one.
+  // An endpoint that sets its own cookie later in the request overrides this.
+  if (session?.legacy) setUserCookie(res, session.userId, session.groupId);
   next();
 }
 

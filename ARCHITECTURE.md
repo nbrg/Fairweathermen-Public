@@ -110,6 +110,7 @@ by area:
 - **Prediction League:** `predictions`
 - **LMS:** `lms_competitions`, `lms_participants`, `lms_selections`, `lms_selection_logs`
 - **Tracking/audit:** `activity_logs`, `visitors`
+- **Server secrets:** `app_secrets` (generated cookie-signing key; never sent to clients)
 - **Push reminders:** `push_subscriptions` (one row per opted-in device), `reminder_sends`
   (dedupe log so each person/game/gameweek reminder sends once)
 
@@ -170,9 +171,13 @@ Anyone can create their own group from the public pages (no admin key needed):
 - `DATABASE_URL` — Neon Postgres connection string (required; server refuses to boot without it).
 - `FOOTBALL_DATA_API_KEY` — football-data.org v4 key for live PL fixtures and scores
   (premium plan, ~20 calls/min — polling is rate-aware; respect the budget).
-- `GROUP_COOKIE_SECRET` — HMAC secret for the group cookie (falls back to `ADMIN_API_KEY`, then an
-  insecure dev default that logs a warning). Set a real value in any shared environment.
-- `ADMIN_API_KEY` — guards admin endpoints.
+- `GROUP_COOKIE_SECRET` — optional HMAC secret for the group cookie. If unset, the server
+  generates one on first boot and stores it in `app_secrets` (`initCookieSecret()` in
+  `server/groupAuth.ts`). Cookies signed with an older key (the stored secret or the `ADMIN_API_KEY`
+  fallback) still verify and are re-signed with the current key on the next request, so changing the
+  key never signs anyone out.
+- `ADMIN_API_KEY` — guards admin endpoints (and shared-data writes: match/score/team edits, fixture
+  syncs, the scraper, and the activity/selection-log views all require it).
 - `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` — web-push (VAPID) key pair for kickoff-reminder
   notifications. Generate with `npx tsx scripts/generateVapidKeys.ts`. If unset, push is
   disabled and `reminderProcessor` is a no-op (the app still boots). Keep the private key secret.

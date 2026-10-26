@@ -49,8 +49,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Group auth: populate req.groupId from the cookie on every request, and
   // gate all /api routes that aren't part of the login flow or the admin
   // surface (which has its own API key auth).
-  const { groupContext, requireGroup, setUserCookie, clearUserCookie, userGameEnabled } = await import("./groupAuth");
+  const { groupContext, requireGroup, setUserCookie, clearUserCookie, userGameEnabled, initCookieSecret } = await import("./groupAuth");
   const { loginLimiter, adminLimiter } = await import("./rateLimits");
+  await initCookieSecret();
   app.use(groupContext);
 
   // Throttle brute-force attempts against the admin API key across the whole
@@ -76,6 +77,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     // Admin endpoints have their own API-key auth and don't operate on a
     // single group's data — skip group gating.
     if (req.path.startsWith("/admin/")) return next();
+    // The owner's admin-key tools (match/score edits, fixture syncs) don't
+    // need a group either.
+    if (process.env.ADMIN_API_KEY && req.headers["x-api-key"] === process.env.ADMIN_API_KEY) {
+      return next();
+    }
     // Everything else requires a verified group cookie.
     if (!req.groupId) return res.status(401).json({ error: "No group selected" });
     next();
@@ -1125,6 +1131,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   // POST /api/matches/:id/score - Update match score manually
   app.post("/api/matches/:id/score", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     try {
       const matchId = parseInt(req.params.id);
       const updateSchema = z.object({
@@ -1204,6 +1211,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
+  // Keep other players' Lawro picks secret until they're revealed. Shared by
+  // every endpoint that returns predictions, so none of them can be used to
+  // read a groupmate's scoreline before the deadline.
+  //
+  // Keep other players' scorelines secret until each gameweek's deadline (its
+  // first kickoff) passes — otherwise they could be read straight off the
+  // network response. We still reveal *that* a pick exists (so the grid can
+  // show who has and hasn't submitted), just not the score: a pre-deadline
+  // pick from another player is redacted to { hidden: true } with no
+  // homeScore/awayScore. Your own picks are always returned in full; everyone's
+  // scorelines appear once the deadline is up. (Finished-match points are
+  // unaffected — a match only finishes well after its deadline.)
+  async function redactUnrevealedPredictions(
+    predictions: any[],
+    _groupId: number | undefined,
+    viewerId: number | undefined,
+  ): Promise<any[]> {
+    const { londonStringToUtcMs } = await import("@shared/time");
+    const allMatches = await storage.getAllMatchesWithTeams();
+    const deadlineByGw = new Map<number, number>();
+    for (const m of allMatches) {
+      if (m.gameweek == null) continue;
+      const ko = londonStringToUtcMs(m.matchTime);
+      if (Number.isNaN(ko)) continue;
+      const cur = deadlineByGw.get(m.gameweek);
+      if (cur == null || ko < cur) deadlineByGw.set(m.gameweek, ko);
+    }
+    const now = Date.now();
+    return predictions.map((p) => {
+      if (p.userId === viewerId) return p;
+      const gw = p.match?.gameweek;
+      const dl = gw != null ? deadlineByGw.get(gw) : undefined;
+      if (dl != null && now >= dl) return p;
+      // Redacted: keep who/which match (for the submitted/not view), drop the
+      // scoreline and any derived fields.
+      return { id: p.id, userId: p.userId, matchId: p.matchId, hidden: true, match: p.match } as any;
+    });
+  }
+
   // GET /api/users/:id/predictions - Get a user's predictions with match details
   app.get("/api/users/:id/predictions", async (req, res) => {
     try {
@@ -1214,7 +1260,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(403).json({ error: "That player isn't in your group" });
       }
       const predictions = await storage.getUserPredictionsWithMatches(userId);
-      res.json(predictions);
+      res.json(await redactUnrevealedPredictions(predictions, req.groupId, req.userId));
     } catch (error) {
       res.status(500).json({ error: "Failed to fetch user predictions" });
     }
@@ -1230,34 +1276,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // per-group, so a group only sees its own members' predictions.
       const predictions = await getOptimizedPredictionsWithMatches(req.groupId);
 
-      // Keep other players' scorelines secret until each gameweek's deadline
-      // (its first kickoff) passes — otherwise they could be read straight off
-      // the network response. We still reveal *that* a pick exists (so the grid
-      // can show who has and hasn't submitted), just not the score: a
-      // pre-deadline pick from another player is redacted to { hidden: true }
-      // with no homeScore/awayScore. Your own picks are always returned in full;
-      // everyone's scorelines appear once the deadline is up. (Finished-match
-      // points are unaffected — a match only finishes well after its deadline.)
-      const { londonStringToUtcMs } = await import("@shared/time");
-      const allMatches = await storage.getAllMatchesWithTeams();
-      const deadlineByGw = new Map<number, number>();
-      for (const m of allMatches) {
-        if (m.gameweek == null) continue;
-        const ko = londonStringToUtcMs(m.matchTime);
-        if (Number.isNaN(ko)) continue;
-        const cur = deadlineByGw.get(m.gameweek);
-        if (cur == null || ko < cur) deadlineByGw.set(m.gameweek, ko);
-      }
-      const now = Date.now();
-      const result = predictions.map((p) => {
-        if (p.userId === req.userId) return p;
-        const gw = p.match?.gameweek;
-        const dl = gw != null ? deadlineByGw.get(gw) : undefined;
-        if (dl != null && now >= dl) return p;
-        // Redacted: keep who/which match (for the submitted/not view), drop the
-        // scoreline and any derived fields.
-        return { id: p.id, userId: p.userId, matchId: p.matchId, hidden: true, match: p.match } as any;
-      });
+      const result = await redactUnrevealedPredictions(predictions, req.groupId, req.userId);
 
       const timeElapsed = Date.now() - startTime;
       console.log(`Predictions API response time: ${timeElapsed}ms`);
@@ -1331,6 +1350,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   // POST /api/scraper/run - Manually trigger score scraping from Flashscore
   app.post("/api/scraper/run", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     try {
       console.log('Manual scraper trigger requested');
       await runScraper(storage);
@@ -1343,6 +1363,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   // POST /api/teams - Create a new team
   app.post("/api/teams", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     try {
       const teamData = insertTeamSchema.parse(req.body);
       const team = await storage.createTeam(teamData);
@@ -1357,6 +1378,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   // POST /api/matches - Create a new match
   app.post("/api/matches", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     try {
       const matchData = insertMatchSchema.parse(req.body);
       const match = await storage.createMatch(matchData);
@@ -1371,6 +1393,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   // PATCH /api/matches/:id - Update a match
   app.patch("/api/matches/:id", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     try {
       const matchId = parseInt(req.params.id);
       const matchUpdate = req.body;
@@ -1971,6 +1994,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // GET /api/admin/lms-selection-logs - Admin endpoint to view team selection logs with human-readable names
   app.get("/api/admin/lms-selection-logs", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     try {
       const logs = await storage.getLmsSelectionLogs();
       res.json(logs);
@@ -1982,6 +2006,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // GET /api/admin/activity-logs - Admin endpoint to view all site activity logs
   app.get("/api/admin/activity-logs", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     try {
       const limit = parseInt(req.query.limit as string) || 100;
       const logs = await storage.getActivityLogs(limit);
@@ -2049,6 +2074,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // POST /api/football-data/sync-fixtures - One-time/manual sync of fixture times + scores from football-data.org
   app.post("/api/football-data/sync-fixtures", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     try {
       const { syncGameweek } = await import('./footballDataApi');
       const startGw = req.body?.startGameweek ? parseInt(req.body.startGameweek) : 1;
