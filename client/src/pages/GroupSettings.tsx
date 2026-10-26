@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useGroup } from "@/contexts/GroupContext";
 import { useToast } from "@/hooks/use-toast";
+import GroupPlayersCard from "@/components/GroupPlayersCard";
 import {
   DEFAULT_GROUP_RULES,
   type GroupRules,
@@ -111,6 +112,7 @@ export default function GroupSettings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -173,6 +175,24 @@ export default function GroupSettings() {
     }
   }
 
+  // Mint a fresh invite link; the old one stops working at once.
+  async function resetInvite() {
+    if (!window.confirm("Make a new invite link? The current one will stop working.")) return;
+    setResetting(true);
+    try {
+      const res = await fetch("/api/group/invite/reset", { method: "POST", credentials: "include" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast({ title: "Couldn't reset the link", description: body?.error || "Please try again.", variant: "destructive" });
+        return;
+      }
+      setData((d) => (d ? { ...d, inviteToken: body.inviteToken } : d));
+      toast({ title: "New invite link ready", description: "The old link no longer works." });
+    } finally {
+      setResetting(false);
+    }
+  }
+
   if (loading || !rules || !data) {
     return <div className="min-h-screen bg-gray-100" />;
   }
@@ -208,9 +228,23 @@ export default function GroupSettings() {
               <p className="text-xs text-gray-500 mt-1">
                 Anyone who opens this link can join and get their own login code.
               </p>
+              {canEdit && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="mt-2 px-0 text-xs text-gray-500 hover:text-gray-700"
+                  onClick={resetInvite}
+                  disabled={resetting}
+                >
+                  {resetting ? "Making a new link…" : "Reset invite link"}
+                </Button>
+              )}
             </CardContent>
           </Card>
         )}
+
+        {canEdit && <GroupPlayersCard groupId={group?.id} />}
 
         {games.has("predictions") && (
           <Card>
