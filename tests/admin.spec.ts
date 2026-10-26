@@ -52,6 +52,19 @@ test.describe("admin dashboards", () => {
   });
 });
 
+test.describe("activity log", () => {
+  test("static files aren't logged as page visits", async ({ request }) => {
+    // A browser fetching an image directly (e.g. the crest logo) used to show
+    // up on /activity as a "/icons/logo.webp" visit.
+    expect((await request.get("/icons/logo.webp")).ok()).toBeTruthy();
+    expect((await request.get("/lawro?asset-test=1")).ok()).toBeTruthy();
+    const res = await request.get("/api/admin/activity", { headers: { "x-api-key": ADMIN_KEY } });
+    const rows: Array<{ path: string }> = await res.json();
+    expect(rows.some((r) => r.path === "/lawro")).toBeTruthy();
+    expect(rows.some((r) => r.path === "/icons/logo.webp")).toBeFalsy();
+  });
+});
+
 test.describe("admin access control", () => {
   test("a protected endpoint rejects a request with no key", async ({ request }) => {
     const res = await request.delete("/api/admin/visitors/1");

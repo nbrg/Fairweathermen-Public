@@ -1,6 +1,5 @@
 import { useState, type FormEvent } from "react";
 import { useGroup } from "@/contexts/GroupContext";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
@@ -25,35 +24,51 @@ export default function GroupGate() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle className="text-xl">Fairweathermen</CardTitle>
-          <p className="text-sm text-gray-500 mt-1">Enter your personal code to continue.</p>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={onSubmit} className="space-y-3">
-            <Input
-              type="text"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              placeholder="Your code"
-              autoComplete="off"
-              spellCheck={false}
-              disabled={submitting}
-            />
-            {error && (
-              <div className="text-xs text-red-600">{error}</div>
-            )}
-            <Button type="submit" disabled={submitting || !code.trim()} className="w-full">
-              {submitting ? "Checking…" : "Enter"}
-            </Button>
-            <p className="text-center text-xs text-gray-500">
-              No code yet? <a href="/create" className="underline">Create your own group</a>
-            </p>
-          </form>
-        </CardContent>
-      </Card>
+    <div className="flex min-h-screen min-h-[100dvh] flex-col bg-primary px-6 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] text-white">
+      <div className="mx-auto flex w-full max-w-sm flex-1 flex-col justify-center gap-6 py-8">
+        <div>
+          <img
+            src="/icons/logo.webp"
+            alt=""
+            aria-hidden
+            width={112}
+            height={112}
+            className="h-28 w-28 shadow-lg shadow-black/30 rounded-[22px]"
+          />
+          <h1 className="font-display mt-6 text-[44px] font-bold leading-none">Fairweathermen</h1>
+          <p className="mt-3 text-[15px] leading-relaxed text-white/70">Enter your personal code to continue.</p>
+        </div>
+        <form onSubmit={onSubmit} className="space-y-3">
+          <label htmlFor="gate-code" className="block text-[13px] font-semibold text-white/80">
+            Your personal code
+          </label>
+          <Input
+            id="gate-code"
+            type="text"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            placeholder="Your code"
+            autoComplete="off"
+            spellCheck={false}
+            disabled={submitting}
+            className="h-[52px] rounded-[14px] border-white/20 bg-white/[0.08] px-4 text-[17px] text-white placeholder:text-white/40 focus-visible:ring-secondary focus-visible:ring-offset-0"
+          />
+          {error && <div className="text-sm text-red-300">{error}</div>}
+          <Button
+            type="submit"
+            disabled={submitting || !code.trim()}
+            className="h-[52px] w-full rounded-[14px] bg-secondary text-base font-bold text-primary hover:bg-secondary/90 disabled:bg-white/15 disabled:text-white/60 disabled:opacity-100"
+          >
+            {submitting ? "Checking…" : "Enter"}
+          </Button>
+        </form>
+        <p className="text-center text-sm text-white/70">
+          No code yet?{" "}
+          <a href="/create" className="font-semibold text-secondary underline-offset-4 hover:underline">
+            Create your own group
+          </a>
+        </p>
+      </div>
     </div>
   );
 }

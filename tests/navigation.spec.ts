@@ -10,9 +10,11 @@ test.beforeAll(reseed);
 test.describe("navigation", () => {
   test("shows the games the group plays", async ({ page }) => {
     await loginViaUi(page, CODES.alex);
-    // Games hosted by the active group are client-side nav links.
+    // Games hosted by the active group are client-side nav links. The compact
+    // nav labels Last Man Standing "LMS".
     await expect(page.getByRole("link", { name: "Lawro" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Last Man Standing" })).toBeVisible();
+    await expect(page.getByRole("link", { name: /^(LMS|Last Man Standing)$/ })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Games" })).toBeVisible();
   });
 
   test("the LMS page loads the current competition's players", async ({ page }) => {

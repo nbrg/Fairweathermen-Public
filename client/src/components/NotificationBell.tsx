@@ -112,11 +112,11 @@ export function NotificationBell() {
           setOpen(true);
         }}
         aria-label="Reminders"
-        className="relative rounded-md p-2 text-white/90 hover:bg-white/15 hover:text-white"
+        className="relative flex h-10 w-10 items-center justify-center rounded-full text-white/90 hover:bg-white/10 hover:text-white"
       >
         {enabled ? <BellRing className="h-5 w-5" /> : <Bell className="h-5 w-5" />}
         {enabled && (
-          <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-green-400 ring-2 ring-primary" />
+          <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-secondary ring-2 ring-primary" />
         )}
       </button>
 

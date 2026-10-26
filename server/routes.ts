@@ -9,6 +9,7 @@ import { getGroupRules } from "./groupRules";
 import { getLocationFromIP, getRealIP } from "./geolocation";
 import { z } from "zod";
 import * as cron from "node-cron";
+import { isStaticAssetPath } from "@shared/staticAssets";
 
 
 // Selections lock `lockMinutesBeforeKickoff` minutes before the gameweek's
@@ -915,13 +916,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Activity logging middleware for all page visits
   app.use(async (req, res, next) => {
     try {
-      // Skip logging for API calls and static assets. This includes the PWA
-      // plumbing the browser fetches automatically on every load — the manifest
-      // and service worker — which otherwise showed up as bogus "page visits".
-      if (req.path.startsWith('/api/') || req.path.includes('.js') || req.path.includes('.css') ||
-          req.path.includes('.png') || req.path.includes('.jpg') || req.path.includes('.ico') ||
-          req.path.includes('.svg') || req.path.includes('.webmanifest') ||
-          req.path === '/sw.js' || req.path.includes('/@')) {
+      // Skip logging for API calls and static files (anything with a file
+      // extension: scripts, styles, images like /icons/logo.webp, the PWA
+      // manifest and service worker). A browser loading or prefetching one of
+      // those directly carries the cookie, so it otherwise showed up as a bogus
+      // "page visit".
+      if (req.path.startsWith('/api/') || isStaticAssetPath(req.path) || req.path.includes('/@')) {
         return next();
       }
 

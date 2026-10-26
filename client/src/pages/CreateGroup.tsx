@@ -8,7 +8,11 @@ import { Checkbox } from "@/components/ui/checkbox";
 // The games a self-service group can choose to run (kept in step with
 // SELF_SERVE_GAMES on the server).
 const GAME_OPTIONS: { key: string; label: string; blurb: string }[] = [
-  { key: "lms", label: "Last Man Standing", blurb: "Pick one team to win each week; a wrong pick knocks you out." },
+  {
+    key: "lms",
+    label: "Last Man Standing",
+    blurb: "Pick one team to win each week, never the same team twice; a wrong pick costs a life. Your first competition starts with the next gameweek.",
+  },
   { key: "predictions", label: "Lawro (score predictions)", blurb: "Predict every Premier League scoreline for points." },
 ];
 
@@ -80,7 +84,7 @@ export default function CreateGroup() {
 
   if (result) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4">
+      <div className="min-h-screen flex items-center justify-center bg-background px-4">
         <Card className="w-full max-w-md">
           <CardHeader>
             <CardTitle className="text-xl">Your group is ready 🎉</CardTitle>
@@ -110,8 +114,20 @@ export default function CreateGroup() {
                 Anyone who opens this link can join and get their own login code.
               </p>
             </div>
-            <Button className="w-full" onClick={() => (window.location.href = "/")}>
-              Enter your group
+            {/* Point the new admin at the rules: scoring, deadlines, lives,
+                buy-in and optional twists like the Lawro Joker all live there. */}
+            <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-3">
+              <p className="text-sm font-medium text-blue-900">Next: set up your rules</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-blue-800">
+                As admin you choose how your group plays: points, deadlines, lives, buy-in and
+                extras like the Joker. Everything starts on sensible defaults.
+              </p>
+            </div>
+            <Button className="w-full" onClick={() => (window.location.href = "/group-settings")}>
+              Set up your rules
+            </Button>
+            <Button variant="outline" className="w-full" onClick={() => (window.location.href = "/")}>
+              Skip for now and enter your group
             </Button>
           </CardContent>
         </Card>
@@ -120,7 +136,7 @@ export default function CreateGroup() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4 py-8">
+    <div className="min-h-screen flex items-center justify-center bg-background px-4 py-8">
       <Card className="w-full max-w-md">
         <CardHeader>
           <CardTitle className="text-xl">Create a group</CardTitle>
@@ -153,7 +169,8 @@ export default function CreateGroup() {
               />
             </div>
             <div className="space-y-2">
-              <Label>Games</Label>
+              <Label>Which games will your group play?</Label>
+              <p className="text-xs text-gray-500">Pick one or both. You can tune each game's rules in Settings before it starts.</p>
               {GAME_OPTIONS.map((g) => (
                 <label key={g.key} className="flex items-start gap-3 rounded-md border p-3 cursor-pointer">
                   <Checkbox
