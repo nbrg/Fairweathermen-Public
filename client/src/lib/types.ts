@@ -36,6 +36,9 @@ export type Prediction = {
   // confirms a pick exists but withholds the scoreline (homeScore/awayScore
   // absent) until the gameweek deadline passes.
   hidden?: boolean;
+  // The player's Joker for the gameweek (points doubled). Only true when the
+  // Joker rule applied to that gameweek; withheld with the scoreline while hidden.
+  isJoker?: boolean;
   match?: Match;
   points?: number;
   status?: 'exact_score' | 'correct_result' | 'incorrect' | 'not_started';

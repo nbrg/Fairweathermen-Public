@@ -290,6 +290,17 @@ export default function GroupSettings() {
                   { value: "random", label: "Fill a random scoreline" },
                 ]}
               />
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <Label>Joker</Label>
+                  <p className="text-xs text-gray-500">Each player picks one of their predictions every gameweek as their Joker, and whatever it scores counts double.</p>
+                </div>
+                <Switch
+                  checked={rules.lawro.jokerEnabled}
+                  onCheckedChange={(v) => setLawro("jokerEnabled", v)}
+                  disabled={!canEdit}
+                />
+              </div>
             </CardContent>
           </Card>
         )}

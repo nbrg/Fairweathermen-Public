@@ -107,6 +107,7 @@ export function describeRuleChanges(before: GroupRules, after: GroupRules): Rule
   add("lawro", "correctResultPoints", "Points for the correct result", String(b.correctResultPoints), String(a.correctResultPoints));
   add("lawro", "deadlineMinutesBeforeKickoff", "Deadline", minutesLabel(b.deadlineMinutesBeforeKickoff), minutesLabel(a.deadlineMinutesBeforeKickoff));
   add("lawro", "missedPickPolicy", "If a player misses the deadline", LAWRO_MISSED_LABELS[b.missedPickPolicy] ?? b.missedPickPolicy, LAWRO_MISSED_LABELS[a.missedPickPolicy] ?? a.missedPickPolicy);
+  add("lawro", "jokerEnabled", "Joker (one pick a week scores double)", b.jokerEnabled ? "On" : "Off", a.jokerEnabled ? "On" : "Off");
   const bl = before.lms;
   const al = after.lms;
   add("lms", "buyIn", "Buy-in", `£${bl.buyIn}`, `£${al.buyIn}`);

@@ -9,7 +9,7 @@ import {
 } from "@shared/schema";
 import { londonStringToUtcMs } from "@shared/time";
 import { db } from "./db";
-import { and, eq, desc, isNull } from "drizzle-orm";
+import { and, eq, desc, isNull, inArray } from "drizzle-orm";
 
 export interface IStorage {
   // User methods
@@ -45,6 +45,7 @@ export interface IStorage {
   createPrediction(prediction: InsertPrediction): Promise<Prediction>;
   updatePrediction(id: number, homeScore: number, awayScore: number): Promise<Prediction | undefined>;
   deletePrediction(id: number): Promise<boolean>;
+  setPredictionJoker(userId: number, predictionId: number, joker: boolean, gameweekMatchIds: number[]): Promise<void>;
   getAllPredictions(): Promise<Prediction[]>;
   getPredictionByUserAndMatch(userId: number, matchId: number): Promise<Prediction | undefined>;
   // Complex methods
@@ -344,6 +345,29 @@ export class DatabaseStorage implements IStorage {
       .where(eq(predictions.id, id))
       .returning();
     return result.length > 0;
+  }
+
+  // Make one of a player's predictions their gameweek Joker (or take it off).
+  // Setting it clears the flag from their other picks in the same gameweek, so
+  // they only ever have one.
+  async setPredictionJoker(
+    userId: number,
+    predictionId: number,
+    joker: boolean,
+    gameweekMatchIds: number[],
+  ): Promise<void> {
+    if (joker && gameweekMatchIds.length > 0) {
+      await db.update(predictions)
+        .set({ isJoker: false })
+        .where(and(
+          eq(predictions.userId, userId),
+          inArray(predictions.matchId, gameweekMatchIds),
+          eq(predictions.isJoker, true),
+        ));
+    }
+    await db.update(predictions)
+      .set({ isJoker: joker })
+      .where(and(eq(predictions.id, predictionId), eq(predictions.userId, userId)));
   }
 
   async getAllPredictions(): Promise<Prediction[]> {

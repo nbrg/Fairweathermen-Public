@@ -94,6 +94,9 @@ export type GroupRules = {
     deadlineMinutesBeforeKickoff: number;
     // What happens to a player with no pick when the deadline passes.
     missedPickPolicy: LawroMissedPolicy;
+    // The Joker: each player may mark one of their predictions per gameweek as
+    // their Joker, and whatever points it scores are doubled (default off).
+    jokerEnabled: boolean;
   };
   lms: {
     // The buy-in / prize pot for a Last Man Standing competition. Bridged from
@@ -122,6 +125,7 @@ export const DEFAULT_GROUP_RULES: GroupRules = {
     correctResultPoints: 1,
     deadlineMinutesBeforeKickoff: 0,
     missedPickPolicy: "blank",
+    jokerEnabled: false,
   },
   lms: {
     buyIn: 0,
@@ -168,6 +172,7 @@ export function resolveGroupRules(stored: Partial<GroupRules> | null | undefined
         10080, // up to a week
       ),
       missedPickPolicy: oneOf(stored?.lawro?.missedPickPolicy, LAWRO_MISSED_POLICIES, d.lawro.missedPickPolicy),
+      jokerEnabled: typeof stored?.lawro?.jokerEnabled === "boolean" ? stored.lawro.jokerEnabled : d.lawro.jokerEnabled,
     },
     lms: {
       buyIn: clampInt(stored?.lms?.buyIn, d.lms.buyIn, 0, 100000),
@@ -323,6 +328,11 @@ export const predictions = pgTable("predictions", {
   // this is always false. Kept to avoid a destructive column drop; safe to
   // remove in a future schema change.
   isAutoPick: boolean("is_auto_pick").notNull().default(false),
+  // The player's Joker for this gameweek under the Lawro Joker rule: its points
+  // are doubled. At most one per player per gameweek; set only through
+  // PUT /api/predictions/:id/joker, never from the create payload. Ignored when
+  // the rule is off for the gameweek (see lawroRulesAt / getLawroRulesResolver).
+  isJoker: boolean("is_joker").notNull().default(false),
 });
 
 // Server-generated secrets, so they don't have to be set by hand. Holds the
