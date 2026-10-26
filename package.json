@@ -11,6 +11,7 @@
     "db:push": "drizzle-kit push",
     "db:seed:test": "tsx scripts/seedTestData.ts",
     "test": "playwright test",
+    "test:affected": "playwright test $(node tests/affected.mjs)",
     "test:headed": "playwright test --headed",
     "test:ui": "playwright test --ui"
   },

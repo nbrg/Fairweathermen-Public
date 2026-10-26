@@ -4,10 +4,72 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
+  # Decide which specs this change needs (see tests/affected.mjs). Pushes to
+  # main and manual runs (Actions > CI > Run workflow) always run everything.
+  plan:
     runs-on: ubuntu-latest
+    outputs:
+      specs: ${{ steps.affected.outputs.specs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick affected specs
+        id: affected
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          FULL: ${{ github.event_name != 'pull_request' }}
+        run: |
+          if [ "$FULL" = "true" ]; then
+            specs=all
+            echo "Running the full suite (push to main or manual run)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            specs=$(node tests/affected.mjs --explain "origin/$BASE_REF" 2> reasons.txt)
+            {
+              echo "### Specs: \`$specs\`"
+              echo '```'
+              cat reasons.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "specs=$specs" >> "$GITHUB_OUTPUT"
+          echo "specs=$specs"
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  # One job per browser profile, in parallel, each with its own database.
+  e2e:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { project: chromium, browser: chromium }
+          - { project: firefox, browser: firefox }
+          - { project: webkit, browser: webkit }
+          - { project: Mobile Chrome, browser: chromium }
+          - { project: Mobile Safari, browser: webkit }
+    name: e2e (${{ matrix.project }})
+    # A full run takes ~3-5 min; don't let a hung install hold the PR for hours.
+    timeout-minutes: 30
 
     services:
       postgres:
@@ -29,6 +91,7 @@ jobs:
       DATABASE_DRIVER: pg
       ADMIN_API_KEY: test-admin-key
       GROUP_COOKIE_SECRET: test-cookie-secret
+      PLAYWRIGHT_PROJECTS: ${{ matrix.project }}
 
     steps:
       - uses: actions/checkout@v4
@@ -41,19 +104,85 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type-check
-        run: npm run check
+      - name: Get Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
 
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-${{ matrix.browser }}
+
+      # Playwright's apt step below blocks on the dpkg lock, which the runner's
+      # boot-time unattended-upgrades can hold for many minutes — long enough to
+      # blow the job timeout. Wait up to a minute for it to clear on its own,
+      # then stop the upgrader and clear the lock so the install can proceed
+      # (runners are ephemeral, so reclaiming it is safe). Bounded so it can
+      # never hang the job.
+      - name: Free the apt lock
+        run: |
+          for i in $(seq 1 12); do
+            sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || exit 0
+            echo "apt lock held, waiting ($i/12)..."; sleep 5
+          done
+          echo "apt lock still held after 60s; stopping the background upgrader"
+          sudo timeout 30 systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          sudo pkill -9 -f unattended-upgrade 2>/dev/null || true
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock 2>/dev/null || true
+          sudo dpkg --configure -a 2>/dev/null || true
+
+      # apt mirrors occasionally stall for close to an hour; give up after
+      # 8 minutes and try again, backing off between attempts.
+      - name: Install Playwright browser
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: |
+          for attempt in 1 2 3; do
+            timeout 480 npx playwright install --with-deps ${{ matrix.browser }} && exit 0
+            echo "Browser install attempt $attempt failed or timed out"
+            sleep 15
+          done
+          exit 1
+
+      - name: Install Playwright system deps
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: |
+          for attempt in 1 2 3; do
+            timeout 480 npx playwright install-deps ${{ matrix.browser }} && exit 0
+            echo "System deps install attempt $attempt failed or timed out"
+            sleep 15
+          done
+          exit 1
 
       - name: Run end-to-end tests
-        run: npm test
+        env:
+          SPECS: ${{ needs.plan.outputs.specs }}
+        run: |
+          if [ "$SPECS" = "all" ]; then
+            npx playwright test
+          else
+            npx playwright test $SPECS
+          fi
 
       - name: Upload test report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.browser }}-${{ strategy.job-index }}
           path: playwright-report/
           retention-days: 14
+
+  # Single status to require in branch protection: passes only if the
+  # type-check and every browser job passed.
+  test:
+    if: ${{ always() }}
+    needs: [typecheck, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All checks passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do [ "$r" = "success" ] || exit 1; done
