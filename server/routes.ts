@@ -49,7 +49,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Group auth: populate req.groupId from the cookie on every request, and
   // gate all /api routes that aren't part of the login flow or the admin
   // surface (which has its own API key auth).
-  const { groupContext, requireGroup, setUserCookie, clearUserCookie, userGameEnabled, initCookieSecret } = await import("./groupAuth");
+  const { groupContext, requireGroup, setUserCookie, clearUserCookie, userGameEnabled, initCookieSecret, logGrowthEvent, ensureVisitorId, isBotUserAgent } = await import("./groupAuth");
   const { loginLimiter, adminLimiter } = await import("./rateLimits");
   await initCookieSecret();
   app.use(groupContext);
@@ -215,8 +215,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const code = String(req.body?.code ?? "").trim().toLowerCase();
       if (!code) return res.status(400).json({ error: "Code required" });
       const session = await buildSession(code);
-      if (!session) return res.status(404).json({ error: "Invalid code" });
+      if (!session) {
+        // Never record the attempted code — it may be a near-miss of a real one.
+        await logGrowthEvent(req, "login_failed");
+        return res.status(404).json({ error: "Invalid code" });
+      }
       setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
+      await logGrowthEvent(req, "login", {
+        userId: session.activeRow.id,
+        groupId: session.activeRow.groupId,
+        details: { groupCount: session.payload.availableGroups.length },
+      });
       res.json(session.payload);
     } catch (err: any) {
       console.error("[/api/group/login] error:", err);
@@ -383,6 +392,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const session = await buildSession(adminRow.loginCode!, group.id);
       if (session) setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
 
+      await logGrowthEvent(req, "group_created", {
+        userId: adminRow.id,
+        groupId: group.id,
+        details: { groupName, slug, games, adminName },
+      });
+
       const inviteUrl = `${req.protocol}://${req.get("host")}/join/${inviteToken}`;
       res.json({
         ok: true,
@@ -410,10 +425,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { groups } = await import("@shared/schema");
       const { eq } = await import("drizzle-orm");
       const [group] = await db
-        .select({ name: groups.name, enabledGames: groups.enabledGames })
+        .select({ id: groups.id, name: groups.name, enabledGames: groups.enabledGames })
         .from(groups)
         .where(eq(groups.inviteToken, token));
       if (!group) return res.status(404).json({ error: "This invite link is invalid or has expired" });
+      if (!isBotUserAgent(req.get("User-Agent"))) {
+        await logGrowthEvent(req, "invite_opened", {
+          userId: req.userId ?? null,
+          groupId: group.id,
+          details: { groupName: group.name },
+        });
+      }
       res.json({ name: group.name, games: group.enabledGames });
     } catch (err: any) {
       console.error("[/api/group/invite GET] error:", err);
@@ -492,6 +514,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           } as any);
         }
       }
+
+      await logGrowthEvent(req, "group_joined", {
+        userId: player.id,
+        groupId: group.id,
+        details: { groupName: group.name, name, rejoin: !!existing },
+      });
 
       const session = await buildSession(player.loginCode!, group.id);
       if (session) setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
@@ -1322,6 +1350,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
         xPurpose.includes('preview') ||
         xPurpose.includes('instant');
 
+      // First real page load from this browser → give it a visitor id and log
+      // a `new_visitor` (shown on /admin/growth). Existing players who simply
+      // predate the cookie are already logged in, so they get an id silently
+      // rather than being counted as new. Prefetches and bots are ignored.
+      let vid: string | null = null;
+      if (req.method === 'GET' && !speculative && !isBotUserAgent(req.get('User-Agent'))) {
+        const visitor = ensureVisitorId(req, res);
+        vid = visitor.vid;
+        if (visitor.isNew && !req.userId) {
+          const utm = Object.fromEntries(
+            Object.entries(req.query).filter(([k]) => k.startsWith('utm_')),
+          );
+          await logGrowthEvent(req, 'new_visitor', {
+            details: {
+              vid,
+              landingPath: req.path,
+              referrer: req.get('Referer') || null,
+              ...(Object.keys(utm).length ? { utm } : {}),
+            },
+          });
+        }
+      }
+
       // Log the activity — groupId is the cookie's group (null pre-login).
       await storage.createActivityLog({
         type: 'page_visit',
@@ -1334,6 +1385,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         details: JSON.stringify({
           method: req.method,
           query: req.query,
+          vid,
           speculative,
           secPurpose: secPurpose || null,
           secFetchMode,
@@ -2943,6 +2995,79 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (err: any) {
       console.error("[admin/groups PATCH] error:", err);
       res.status(500).json({ error: err?.message || "Failed to update group" });
+    }
+  });
+
+  // GET /api/admin/growth?days=N — onboarding/growth feed across ALL groups
+  // (admin-key gated): new visitors, invite links opened, groups created,
+  // players joining, code logins (and failed ones) from the last N days (default
+  // 90), plus every group with its creation date, admin and player count.
+  app.get("/api/admin/growth", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { db } = await import("./db");
+      const { activityLogs, users, groups } = await import("@shared/schema");
+      const { eq, inArray, desc, and, gte, count } = await import("drizzle-orm");
+      const days = Math.min(Math.max(Number(req.query.days) || 90, 1), 365);
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const growthTypes = [
+        "new_visitor",
+        "invite_opened",
+        "group_created",
+        "group_joined",
+        "login",
+        "login_failed",
+      ];
+      const events = await db
+        .select({
+          id: activityLogs.id,
+          type: activityLogs.type,
+          userId: activityLogs.userId,
+          username: users.username,
+          ipAddress: activityLogs.ipAddress,
+          userAgent: activityLogs.userAgent,
+          city: activityLogs.city,
+          country: activityLogs.country,
+          path: activityLogs.path,
+          details: activityLogs.details,
+          groupId: activityLogs.groupId,
+          groupName: groups.name,
+          createdAt: activityLogs.createdAt,
+        })
+        .from(activityLogs)
+        .leftJoin(users, eq(activityLogs.userId, users.id))
+        .leftJoin(groups, eq(activityLogs.groupId, groups.id))
+        .where(and(inArray(activityLogs.type, growthTypes), gte(activityLogs.createdAt, since)))
+        .orderBy(desc(activityLogs.createdAt))
+        .limit(20000);
+
+      const playerCounts = await db
+        .select({ groupId: users.groupId, players: count() })
+        .from(users)
+        .groupBy(users.groupId);
+      const playersByGroup = new Map(playerCounts.map((r) => [r.groupId, Number(r.players)]));
+      const allGroups = await db.select().from(groups).orderBy(desc(groups.createdAt));
+      const ownerIds = allGroups.map((g) => g.ownerUserId).filter((id): id is number => id != null);
+      const owners = ownerIds.length
+        ? await db.select({ id: users.id, username: users.username }).from(users).where(inArray(users.id, ownerIds))
+        : [];
+      const ownerName = new Map(owners.map((o) => [o.id, o.username]));
+
+      res.json({
+        days,
+        events,
+        groups: allGroups.map((g) => ({
+          id: g.id,
+          name: g.name,
+          createdAt: g.createdAt,
+          enabledGames: g.enabledGames,
+          admin: g.ownerUserId != null ? ownerName.get(g.ownerUserId) ?? null : null,
+          players: playersByGroup.get(g.id) ?? 0,
+        })),
+      });
+    } catch (err: any) {
+      console.error("[/api/admin/growth] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to load growth data" });
     }
   });
 
