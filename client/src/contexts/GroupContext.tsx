@@ -1,6 +1,18 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { queryClient } from "@/lib/queryClient";
-import type { GroupRules } from "@shared/schema";
+import type { GroupRules, RuleChangeItem } from "@shared/schema";
+
+// A rule change the admin made that this player hasn't acknowledged yet.
+export type UnseenRuleChange = {
+  id: number;
+  changedAt: string;
+  // Who made the change (the group's admin), for "Alex has changed the rules".
+  changedByName: string | null;
+  changes: RuleChangeItem[];
+  // Set when Lawro rules changed: the first gameweek the change applies to
+  // (99 = from next season).
+  lawroEffectiveGameweek: number | null;
+};
 
 export type SessionUser = {
   id: number;
@@ -33,6 +45,9 @@ export type Group = {
   // True when the logged-in person created this group (is its admin). Gates the
   // owner-only group settings page + header link.
   isOwner?: boolean;
+  // Rule changes made by the admin since this player last acknowledged them;
+  // shown in a pop-up (RuleChangesDialog) until they do.
+  ruleChanges?: UnseenRuleChange[];
 };
 
 type GroupContextValue = {
@@ -45,6 +60,9 @@ type GroupContextValue = {
   login: (code: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   logout: () => Promise<void>;
   switchGroup: (groupId: number) => Promise<{ ok: true } | { ok: false; error: string }>;
+  // Marks the rule-change pop-up as read up to `upToId`: hides it at once and
+  // records it on the server so it doesn't come back.
+  dismissRuleChanges: (upToId: number) => void;
 };
 
 const GroupContext = createContext<GroupContextValue | null>(null);
@@ -117,6 +135,22 @@ export function GroupProvider({ children }: { children: ReactNode }) {
     return { ok: true as const };
   };
 
+  const dismissRuleChanges = (upToId: number) => {
+    // Drop the acknowledged changes from the session itself (not just from the
+    // pop-up's own state) so nothing can bring them back until a reload.
+    setGroup((g) => (g ? { ...g, ruleChanges: (g.ruleChanges ?? []).filter((c) => c.id > upToId) } : g));
+    fetch("/api/group/rule-changes/seen", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ upToId }),
+    })
+      .then((res) => {
+        if (!res.ok) console.error("[rule-changes/seen] failed:", res.status);
+      })
+      .catch((err) => console.error("[rule-changes/seen] failed:", err));
+  };
+
   return (
     <GroupContext.Provider
       value={{
@@ -127,6 +161,7 @@ export function GroupProvider({ children }: { children: ReactNode }) {
         login,
         logout,
         switchGroup,
+        dismissRuleChanges,
       }}
     >
       {children}

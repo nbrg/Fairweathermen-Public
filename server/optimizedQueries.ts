@@ -1,26 +1,10 @@
 import { db } from "./db";
-import { groups, matches, predictions, teams, users } from "@shared/schema";
+import { matches, predictions, teams, users } from "@shared/schema";
+import { getLawroRulesResolver } from "./groupRules";
 import { eq } from "drizzle-orm";
 import { Match, MatchWithTeams, Prediction, PredictionWithMatch, Team, User, UserWithPredictions } from "@shared/schema";
-import { DEFAULT_GROUP_RULES, resolveGroupRules } from "@shared/schema";
+import { DEFAULT_GROUP_RULES } from "@shared/schema";
 import { performance } from "perf_hooks";
-
-// Lawro points for a group, resolved from its rules (falls back to the built-in
-// 3/1 defaults when no group is given or it has no overrides). Centralises the
-// one place the point values come from so the scoring + leaderboard agree.
-async function lawroPointsForGroup(
-  groupId?: number,
-): Promise<{ exact: number; result: number }> {
-  if (groupId == null) {
-    return {
-      exact: DEFAULT_GROUP_RULES.lawro.exactScorePoints,
-      result: DEFAULT_GROUP_RULES.lawro.correctResultPoints,
-    };
-  }
-  const [group] = await db.select({ rules: groups.rules }).from(groups).where(eq(groups.id, groupId));
-  const rules = resolveGroupRules(group?.rules);
-  return { exact: rules.lawro.exactScorePoints, result: rules.lawro.correctResultPoints };
-}
 
 // Keep only the latest season's rows (mirrors storage.filterToCurrentSeason).
 // Falls back to all rows if none are season-tagged (legacy data).
@@ -70,6 +54,9 @@ export async function getOptimizedPredictionsWithMatches(groupId?: number): Prom
   console.log("Starting optimized predictions query");
 
   try {
+    // The group's Lawro points (exact / correct result) as they stood for each
+    // gameweek — an admin's edit only applies from the next open gameweek.
+    const lawroRulesFor = await getLawroRulesResolver(groupId);
     // Step 1: Get all predictions in a single query. When a groupId is given,
     // scope to just that group's players — the Prediction League ("Lawro") is a
     // per-group game, so a group only ever sees its own members' predictions.
@@ -98,9 +85,6 @@ export async function getOptimizedPredictionsWithMatches(groupId?: number): Prom
     const allTeams = await db.select().from(teams);
     console.log(`Got ${allTeams.length} teams in ${Math.round(performance.now() - startTime)}ms`);
 
-    // This group's configurable Lawro point values (defaults 3/1).
-    const points = await lawroPointsForGroup(groupId);
-    
     // Step 4: Create lookup maps for O(1) access
     const teamsMap = new Map<number, Team>();
     for (const team of allTeams) {
@@ -130,7 +114,13 @@ export async function getOptimizedPredictionsWithMatches(groupId?: number): Prom
       const matchPredictions = allPredictions.filter(p => p.matchId === match.id);
       
       for (const prediction of matchPredictions) {
-        const { points: predPoints, status } = calculatePoints(prediction, match, points);
+        // Score with the Lawro points in force for this match's gameweek, so an
+        // admin's points change never rescores a gameweek already played.
+        const gwRules = lawroRulesFor(match.season, match.gameweek);
+        const { points: predPoints, status } = calculatePoints(prediction, match, {
+          exact: gwRules.exactScorePoints,
+          result: gwRules.correctResultPoints,
+        });
 
         result.push({
           ...prediction,
@@ -174,10 +164,6 @@ export async function getOptimizedLeaderboard(groupId?: number): Promise<UserWit
     // Step: 2: Get optimized predictions with matches (same group scope)
     const allPredictionsWithMatches = await getOptimizedPredictionsWithMatches(groupId);
 
-    // This group's configurable Lawro point values (defaults 3/1), so the
-    // leaderboard tally matches the per-prediction scoring above.
-    const points = await lawroPointsForGroup(groupId);
-    
     // Step 3: Group predictions by user ID
     const predictionsByUser = new Map<number, PredictionWithMatch[]>();
     for (const prediction of allPredictionsWithMatches) {
@@ -201,11 +187,11 @@ export async function getOptimizedLeaderboard(groupId?: number): Promise<UserWit
       for (const prediction of userPredictions) {
         if (prediction.status === "exact_score") {
           exactScores++;
-          totalPoints += points.exact;
         } else if (prediction.status === "correct_result") {
           correctResults++;
-          totalPoints += points.result;
         }
+        // Each prediction already carries the points its gameweek's rules gave.
+        totalPoints += prediction.points ?? 0;
       }
       
       leaderboard.push({

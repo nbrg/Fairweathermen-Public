@@ -161,7 +161,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       (defaultGroup && sortedRows.find((r) => r.groupId === defaultGroup.id)) ||
       sortedRows[0];
     const activeGroup = grps.find((g) => g.id === activeRow.groupId)!;
-    const { resolveGroupRulesForGroup } = await import("./groupRules");
+    const { resolveGroupRulesForGroup, unseenRuleChanges } = await import("./groupRules");
+    // Rule changes this person hasn't acknowledged yet (excluding ones they made
+    // themselves), oldest first — drives the "the rules have changed" pop-up.
+    const ruleChanges = await unseenRuleChanges(
+      activeGroup.id,
+      activeRow.id,
+      activeRow.lastSeenRuleChangeId ?? 0,
+    );
     return {
       activeRow,
       payload: {
@@ -191,6 +198,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
             enabledGames: effectiveGames(g.enabledGames, row?.enabledGames),
           };
         }),
+        // Unacknowledged rule changes for the "the rules have changed" pop-up.
+        ruleChanges,
       },
     };
   }
@@ -455,6 +464,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       const linked = req.userId != null;
       if (!player) {
+        // Start a new joiner at the group's latest rule change so they aren't
+        // shown the "rules have changed" pop-up for changes made before they
+        // arrived.
+        const { latestRuleChangeId } = await import("./groupRules");
         const [row] = await db
           .insert(users)
           .values({
@@ -462,6 +475,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             password: "password",
             groupId: group.id,
             loginCode: await codeForNewSelfServiceRow(req.userId),
+            lastSeenRuleChangeId: await latestRuleChangeId(group.id),
           })
           .returning();
         player = row;
@@ -561,10 +575,63 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .update(groups)
         .set({ rules: merged, ...columnUpdates })
         .where(eq(groups.id, req.groupId!));
+
+      // Log any change so it drives everyone's "the rules changed" pop-up and
+      // keeps earlier Lawro gameweeks on the rules they were played under.
+      const { describeRuleChanges } = await import("./groupRules");
+      const items = describeRuleChanges(current, merged);
+      if (items.length > 0) {
+        const { groupRuleChanges } = await import("@shared/schema");
+        const { nextUnstartedGameweek } = await import("./lmsAutoStart");
+        const lawroChanged = JSON.stringify(merged.lawro) !== JSON.stringify(current.lawro);
+        // A Lawro change applies from the first gameweek still open under the
+        // new deadline; with none left this season it starts from a high
+        // gameweek (99), so the whole current season keeps its old rules.
+        const lawroFrom = lawroChanged
+          ? await nextUnstartedGameweek(merged.lawro.deadlineMinutesBeforeKickoff)
+          : null;
+        const lawroSeason = lawroChanged
+          ? lawroFrom?.season ?? (await storage.getAllMatches()).find((m) => m.season)?.season ?? null
+          : null;
+        await db.insert(groupRuleChanges).values({
+          groupId: req.groupId!,
+          changedByUserId: req.userId ?? null,
+          before: current,
+          after: merged,
+          changes: items,
+          lawroEffectiveSeason: lawroChanged ? lawroSeason : null,
+          lawroEffectiveGameweek: lawroChanged ? lawroFrom?.gameweek ?? 99 : null,
+        });
+      }
+
       res.json({ ok: true, rules: merged });
     } catch (err: any) {
       console.error("[/api/group/rules PUT] error:", err);
       res.status(500).json({ error: err?.message || "Failed to save rules" });
+    }
+  });
+
+  // POST /api/group/rule-changes/seen — the player acknowledged the rule-change
+  // pop-up. Body { upToId } marks everything up to that change as seen (never
+  // moves backwards), so a change made while the pop-up was open still shows.
+  app.post("/api/group/rule-changes/seen", requireGroup, async (req, res) => {
+    try {
+      if (!req.userId) return res.status(401).json({ error: "Not signed in" });
+      const upToId = Number(req.body?.upToId);
+      if (!Number.isInteger(upToId) || upToId < 0) return res.status(400).json({ error: "Invalid upToId" });
+      const { db } = await import("./db");
+      const { users } = await import("@shared/schema");
+      const { and, eq, lt } = await import("drizzle-orm");
+      const { latestRuleChangeId } = await import("./groupRules");
+      const capped = Math.min(upToId, await latestRuleChangeId(req.groupId!));
+      await db
+        .update(users)
+        .set({ lastSeenRuleChangeId: capped })
+        .where(and(eq(users.id, req.userId!), eq(users.groupId, req.groupId!), lt(users.lastSeenRuleChangeId, capped)));
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("[/api/group/rule-changes/seen POST] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to save" });
     }
   });
 

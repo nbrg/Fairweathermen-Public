@@ -20,6 +20,7 @@ import AuditPage from "@/pages/AuditPage";
 import ActivityPage from "@/pages/ActivityPage";
 import HelpPage from "@/pages/HelpPage";
 import { GroupProvider, useGroup } from "@/contexts/GroupContext";
+import RuleChangesDialog from "@/components/RuleChangesDialog";
 import ScreenResolutionTracker from "@/components/ScreenResolutionTracker";
 import { usePageTracking } from "@/hooks/usePageTracking";
 
@@ -186,7 +187,12 @@ function GatedShell() {
     return <GroupGate />;
   }
 
-  return <Router />;
+  return (
+    <>
+      <Router />
+      {group && <RuleChangesDialog />}
+    </>
+  );
 }
 
 function App() {
