@@ -7,6 +7,10 @@
 
     <!-- PWA: installable to the Home Screen, which is what makes web-push
          reminders possible (on iOS, push only works once installed). -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet" />
+
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#0b1e46" />
     <link rel="icon" type="image/png" href="/icons/icon-192.png" />
@@ -18,5 +22,7 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <!-- This is a replit script which adds a banner on the top of the page when opened in development mode outside the replit environment -->
+    <script type="text/javascript" src="https://replit.com/public/js/replit-dev-banner.js"></script>
   </body>
 </html>

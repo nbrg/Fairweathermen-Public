@@ -4,6 +4,7 @@ import { Check, X } from "lucide-react";
 
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
+import { AdminNav } from "@/components/AdminNav";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -293,9 +294,10 @@ export default function AdminPlayers() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-gray-100">
+    <div className="min-h-screen flex flex-col bg-background">
       <Header />
       <main className="container mx-auto px-4 py-6 flex-grow space-y-6">
+        <AdminNav />
         <div>
           <h1 className="text-2xl font-bold text-primary">Manage Players</h1>
           <p className="text-sm text-gray-600">

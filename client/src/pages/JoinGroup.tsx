@@ -66,12 +66,12 @@ export default function JoinGroup({ token }: { token: string }) {
   }
 
   if (checking) {
-    return <div className="min-h-screen bg-gray-100" />;
+    return <div className="min-h-screen bg-background" />;
   }
 
   if (loadError) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4">
+      <div className="min-h-screen flex items-center justify-center bg-background px-4">
         <Card className="w-full max-w-sm">
           <CardHeader>
             <CardTitle className="text-xl">Invite not found</CardTitle>
@@ -89,7 +89,7 @@ export default function JoinGroup({ token }: { token: string }) {
 
   if (loginCode) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4">
+      <div className="min-h-screen flex items-center justify-center bg-background px-4">
         <Card className="w-full max-w-sm">
           <CardHeader>
             <CardTitle className="text-xl">You're in 🎉</CardTitle>
@@ -119,7 +119,7 @@ export default function JoinGroup({ token }: { token: string }) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-background px-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle className="text-xl">Join {groupName}</CardTitle>

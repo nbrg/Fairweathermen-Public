@@ -47,17 +47,21 @@ test.describe("multi-group switching", () => {
 
   test("the switcher changes the active group in the UI", async ({ page }) => {
     await loginViaUi(page, CODES.alex);
-    // Lawro is a Demo-only game, so its tab is a sign of the active group.
+    // Demo League hosts Lawro, so while it's active the Lawro tab is a
+    // same-group nav link.
+    const switcher = page.getByTestId("group-switcher");
+    await expect(switcher).toContainText("Demo League");
     await expect(page.getByRole("link", { name: "Lawro" })).toBeVisible();
 
-    // The group switcher only appears for multi-group people.
-    const switcher = page.getByTestId("group-switcher");
     await switcher.click();
     await page.getByRole("option", { name: "Rovers" }).click();
 
-    // Rovers has no Lawro, so that tab goes away once we're in Rovers.
+    // The active group is now Rovers, which doesn't host Lawro — the tab stays
+    // in the nav (Alex still plays Lawro in Demo) but becomes a cross-group
+    // switch button rather than a link.
+    await expect(switcher).toContainText("Rovers");
     await expect(page.getByRole("link", { name: "Lawro" })).toBeHidden();
-    await expect(page.getByRole("link", { name: "Last Man Standing" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Lawro" })).toBeVisible();
   });
 
   test("switching keeps you on the same game tab when the new group offers it", async ({ page }) => {

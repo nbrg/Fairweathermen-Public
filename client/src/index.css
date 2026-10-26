@@ -12,26 +12,27 @@ body {
 }
 
 :root {
-  --background: 0 0% 100%;
-  --foreground: 20 14.3% 4.1%;
-  --muted: 60 4.8% 95.9%;
-  --muted-foreground: 25 5.3% 44.7%;
+  /* "Matchday" palette: PL purple + green on a cool off-white ground. */
+  --background: 260 20% 97%;
+  --foreground: 270 26% 10%;
+  --muted: 258 16% 93%;
+  --muted-foreground: 266 7% 43%;
   --popover: 0 0% 100%;
-  --popover-foreground: 20 14.3% 4.1%;
+  --popover-foreground: 270 26% 10%;
   --card: 0 0% 100%;
-  --card-foreground: 20 14.3% 4.1%;
-  --border: 20 5.9% 90%;
-  --input: 20 5.9% 90%;
+  --card-foreground: 270 26% 10%;
+  --border: 258 16% 91%;
+  --input: 258 14% 86%;
   --primary: 273 68% 12%; /* Premier League purple */
   --primary-foreground: 0 0% 100%;
   --secondary: 144 72% 50%; /* Premier League green */
   --secondary-foreground: 273 68% 12%;
   --accent: 273 39% 45%; /* Lighter purple */
   --accent-foreground: 0 0% 100%;
-  --destructive: 0 84.2% 60.2%;
-  --destructive-foreground: 60 9.1% 97.8%;
-  --ring: 20 14.3% 4.1%;
-  --radius: 0.5rem;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --ring: 273 39% 45%;
+  --radius: 0.875rem;
   --chart-1: 273 68% 12%;
   --chart-2: 144 72% 50%;
   --chart-3: 273 39% 45%;
@@ -73,7 +74,38 @@ body {
 
   body {
     @apply font-sans antialiased bg-background text-foreground;
+    -webkit-tap-highlight-color: transparent;
   }
+}
+
+@layer components {
+  /* Condensed display face for scores, ranks, countdowns and page titles. */
+  .font-display {
+    font-family: "Barlow Condensed", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.01em;
+  }
+  /* Small uppercase label above a value ("GW10 DEADLINE"). */
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
+  }
+}
+
+/* Freeze the first (label) column of a horizontally scrolling table: put
+   `table-sticky-first` on the overflow-x-auto wrapper. The selectors sit in
+   :where() so any bg-* class on a cell still wins; untinted cells get the card
+   colour so scrolled cells don't show through. Rows tinted with a plain bg-*
+   class pass their tint on to the frozen cell. */
+:where(.table-sticky-first) :where(tr > :first-child) {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background-color: hsl(var(--card));
+  box-shadow:
+    inset -1px 0 0 hsl(var(--border)),
+    6px 0 8px -6px rgb(0 0 0 / 0.18);
+}
+:where(.table-sticky-first) :where(tr[class^="bg-"] > :first-child, tr[class*=" bg-"] > :first-child) {
+  background-color: inherit;
 }
 
 /* Hide number input arrows to prevent centering issues */

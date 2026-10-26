@@ -68,7 +68,7 @@ function LawroRoute() {
   // (that would fire wrong-group queries and flash the wrong data). A brief
   // blank is enough — switchGroup updates the context and re-renders us.
   if (needsSwitch) {
-    return <div className="min-h-screen bg-gray-100" />;
+    return <div className="min-h-screen bg-background" />;
   }
   return <HomePage />;
 }
@@ -175,7 +175,7 @@ function GatedShell() {
 
   if (loading) {
     // Brief blank while we check the cookie; avoids a flash of the gate.
-    return <div className="min-h-screen bg-gray-100" />;
+    return <div className="min-h-screen bg-background" />;
   }
 
   if (isSwitchPath) {

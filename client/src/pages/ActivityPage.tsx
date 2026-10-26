@@ -5,6 +5,7 @@ import { isOwnUsername } from "@/lib/utils";
 import { GroupMultiSelect } from "@/components/GroupMultiSelect";
 import { AdminGate } from "@/components/AdminGate";
 import { AdminNav } from "@/components/AdminNav";
+import { isStaticAssetPath } from "@shared/staticAssets";
 
 type ActivityEvent = {
   id: number;
@@ -283,7 +284,9 @@ export default function ActivityPage() {
   }, [events]);
 
   const filteredEvents = useMemo(
-    () => (events ?? []).filter((e) => effectiveSelected.has(e.groupId)),
+    // Static-file rows (e.g. /icons/logo.webp) were logged as visits before the
+    // server learned to skip them; never show them.
+    () => (events ?? []).filter((e) => effectiveSelected.has(e.groupId) && !isStaticAssetPath(e.path)),
     [events, effectiveSelected],
   );
 
@@ -354,7 +357,7 @@ export default function ActivityPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen bg-background">
       <main className="container mx-auto px-4 py-6">
         <AdminNav />
         <div className="mb-4">
