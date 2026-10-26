@@ -28,21 +28,26 @@ test.describe("group admin player tools", () => {
     await member.dispose();
   });
 
-  test("the LMS sit-out endpoint reports when there's no competition to change", async ({ request, playwright, baseURL }) => {
-    // A newly created LMS group has no running competition yet, so the roster
-    // can't be changed; the endpoint says so rather than erroring.
+  test("a player can sit out the next LMS competition and be added back", async ({ request, playwright, baseURL }) => {
     const created = await createGroup(request);
     const joiner = await playwright.request.newContext({ baseURL });
     await joiner.post(`/api/group/join/${created.inviteToken}`, { data: { name: "Sam" } });
     await joiner.dispose();
 
+    // The group's first LMS competition auto-starts at the next gameweek that
+    // hasn't kicked off, so it's open and everyone's in it.
     const list = await (await request.get("/api/group/players")).json();
-    expect(list.lms).toBeNull();
+    expect(list.lms?.open).toBe(true);
     const samRow = list.players.find((p: any) => p.username === "Sam");
-    expect(samRow.inLms).toBe(false);
+    expect(samRow.inLms).toBe(true);
 
-    const res = await request.put(`/api/group/players/${samRow.id}/lms`, { data: { inLms: false } });
-    expect(res.status()).toBe(409);
+    expect((await request.put(`/api/group/players/${samRow.id}/lms`, { data: { inLms: false } })).ok()).toBeTruthy();
+    let after = await (await request.get("/api/group/players")).json();
+    expect(after.players.find((p: any) => p.id === samRow.id).inLms).toBe(false);
+
+    expect((await request.put(`/api/group/players/${samRow.id}/lms`, { data: { inLms: true } })).ok()).toBeTruthy();
+    after = await (await request.get("/api/group/players")).json();
+    expect(after.players.find((p: any) => p.id === samRow.id).inLms).toBe(true);
   });
 
   test("resetting a code retires the old one", async ({ request, playwright, baseURL }) => {
