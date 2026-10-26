@@ -52,6 +52,7 @@ docker run --rm -d -p 5432:5432 \
   --name fwm-test-db postgres:16
 
 npm test            # run everything
+npm run test:affected # only the specs your uncommitted change touches
 npm run test:headed # watch it in a real browser window
 npm run test:ui     # Playwright's interactive UI
 ```
@@ -62,5 +63,19 @@ seeds a small fixed dataset — see [`global-setup.ts`](./global-setup.ts) and
 three login codes (`demo-alex`, `demo-blake`, `demo-casey`) you can also use to
 poke around the app by hand.
 
-After a run, `npx playwright show-report` opens the HTML report. The same suite
-runs on every push through GitHub Actions ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)).
+After a run, `npx playwright show-report` opens the HTML report.
+
+## On CI
+
+GitHub Actions ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs
+the type-check and the five browser profiles as separate jobs in parallel, each
+with its own Postgres, and a final `test` job that goes green only if they all
+did (that's the one status to require in branch protection).
+
+To keep pull requests quick, a PR only runs the specs its diff actually touches:
+[`affected.mjs`](./affected.mjs) maps each source file to the area(s) that
+exercise it, and anything core (schema, `routes.ts`, the app shell, the test
+harness, build config) or unmapped falls back to the whole suite. Pushes to
+`main` and manual runs always run everything. When you add a source file, add it
+to an area in `affected.mjs` so PRs touching it stay fast; a new spec is picked
+up automatically.
