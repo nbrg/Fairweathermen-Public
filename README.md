@@ -83,24 +83,63 @@ worth not repeating in [ARCHITECTURE.md](./ARCHITECTURE.md).
 You'll need Node 20 or newer, a Postgres database, and (if you want live scores)
 a [football-data.org](https://www.football-data.org/) API key.
 
+**1. Fork and clone.** If you want your own league to run and tweak, fork the
+repo on GitHub first (the **Fork** button, top right) — that gives you your own
+copy to push to. Then clone it, replacing `<your-username>` with your GitHub
+name:
+
+```bash
+git clone https://github.com/<your-username>/Fairweathermen-Public.git
+cd Fairweathermen-Public
+```
+
+If you only want to run it as-is, clone this repo directly instead:
+
+```bash
+git clone https://github.com/nbrg/Fairweathermen-Public.git
+cd Fairweathermen-Public
+```
+
+**2. Install the dependencies.**
+
 ```bash
 npm install
+```
 
+**3. Set up your environment.** Copy the example file and fill in your own
+values:
+
+```bash
 cp .env.example .env
-# then edit .env:
-#   DATABASE_URL          your Postgres connection string
-#   ADMIN_API_KEY         any secret; it guards the admin pages
-#   GROUP_COOKIE_SECRET   any long random string
-#   FOOTBALL_DATA_API_KEY optional; without it, live scores are just skipped
-#   VAPID_* optional; run `npx tsx scripts/generateVapidKeys.ts` for a key pair
+```
 
-npm run db:push                           # create the tables
+```
+DATABASE_URL          your Postgres connection string
+ADMIN_API_KEY         any secret; it guards the admin pages
+GROUP_COOKIE_SECRET   a long random string (node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+FOOTBALL_DATA_API_KEY optional; without it, live scores are just skipped
+VAPID_*               optional; run `npx tsx scripts/generateVapidKeys.ts` for a key pair
+```
+
+**4. Create the tables, and a first group to log in with.**
+
+```bash
+npm run db:push                           # apply the schema to your database
 npx tsx scripts/startLawro.ts --confirm   # make a group and add some players
-npm run dev                               # http://localhost:5000
 ```
 
 `startLawro.ts` prints each player's login code when it runs — those are what
-people type on the landing page.
+people type on the landing page. (You can also skip it and create your group
+from the running app at `/create`.)
+
+**5. Start it.**
+
+```bash
+npm run dev                               # http://localhost:5000
+```
+
+For a production build instead, run `npm run build` then `npm run start` (see
+[Commands](#commands) below).
 
 ### Commands
 
