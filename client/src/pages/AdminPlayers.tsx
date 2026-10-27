@@ -70,7 +70,7 @@ export default function AdminPlayers() {
     games: string[];
     buyIn: string;
     lmsAllOutRule: string;
-  }>({ name: "", slug: "", games: ["lms"], buyIn: "0", lmsAllOutRule: "rollover" });
+  }>({ name: "", slug: "", games: ["lms"], buyIn: "10", lmsAllOutRule: "rollover" });
   // Per-group unsaved rule edits, keyed by group id.
   const [ruleDrafts, setRuleDrafts] = useState<
     Record<number, { buyIn: string; lmsAllOutRule: string }>
@@ -177,7 +177,7 @@ export default function AdminPlayers() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
       setStatus({ ok: true, message: `Created group "${name}". Add players below.` });
-      setNewGroup({ name: "", slug: "", games: ["lms"], buyIn: "0", lmsAllOutRule: "rollover" });
+      setNewGroup({ name: "", slug: "", games: ["lms"], buyIn: "10", lmsAllOutRule: "rollover" });
       await refresh();
     } catch (err: any) {
       setStatus({ ok: false, message: err?.message || "Create failed" });

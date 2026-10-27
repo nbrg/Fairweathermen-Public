@@ -34,6 +34,8 @@ test.describe("self-service group creation + invites", () => {
     expect(meBody.isOwner).toBe(true);
     expect(meBody.rules?.lms).toBeTruthy();
     expect(meBody.rules?.lawro).toBeTruthy();
+    // A new group's LMS buy-in defaults to £10.
+    expect(meBody.rules?.lms?.buyIn).toBe(10);
   });
 
   test("create requires a name and a self-serve game", async ({ request }) => {
