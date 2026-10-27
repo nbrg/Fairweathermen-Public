@@ -80,6 +80,18 @@ test.describe("Last Man Standing UI", () => {
     }
   });
 
+  test("the Team Selections table opens scrolled to the latest gameweek", async ({ page }) => {
+    // Narrow enough that the gameweek columns overflow the frame.
+    await page.setViewportSize({ width: 240, height: 800 });
+    await loginViaUi(page, CODES.alex);
+    await page.goto("/last-man-standing");
+    const grid = page.getByTestId("lms-selections-grid");
+    await expect(grid.getByText("GW2", { exact: true })).toBeVisible();
+    const m = await grid.evaluate((el) => ({ left: el.scrollLeft, width: el.clientWidth, full: el.scrollWidth }));
+    expect(m.full).toBeGreaterThan(m.width);
+    expect(m.left + m.width).toBeGreaterThanOrEqual(m.full - 1);
+  });
+
   test("a player can make a pick through the team picker", async ({ page }) => {
     // Blake has no selection yet (Casey picks via the API test above), so the
     // open gameweek offers the "Make your pick" button.
