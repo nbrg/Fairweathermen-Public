@@ -63,6 +63,9 @@ type GroupContextValue = {
   // Marks the rule-change pop-up as read up to `upToId`: hides it at once and
   // records it on the server so it doesn't come back.
   dismissRuleChanges: (upToId: number) => void;
+  // Re-reads the session (rules, games, unseen rule changes) from the server,
+  // e.g. after the admin saves new rules, so pages don't keep the old ones.
+  refreshSession: () => Promise<void>;
 };
 
 const GroupContext = createContext<GroupContextValue | null>(null);
@@ -91,6 +94,26 @@ export function GroupProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // The session is otherwise only read on mount, so a rule the admin just
+  // turned on (e.g. the Lawro Joker) wouldn't show until a full reload. Re-read
+  // it whenever the app comes back to the foreground too.
+  const refreshSession = async () => {
+    try {
+      const res = await fetch("/api/group/me", { credentials: "include" });
+      if (res.ok) setGroup((await res.json()) as Group);
+    } catch {
+      // ignore — keep the current session
+    }
+  };
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshSession();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, []);
 
   const login = async (code: string) => {
@@ -162,6 +185,7 @@ export function GroupProvider({ children }: { children: ReactNode }) {
         logout,
         switchGroup,
         dismissRuleChanges,
+        refreshSession,
       }}
     >
       {children}
