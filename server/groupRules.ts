@@ -79,7 +79,6 @@ const LAWRO_MISSED_LABELS: Record<string, string> = {
 const LMS_MISSED_LABELS: Record<string, string> = {
   random: "Assign a random team",
   eliminate: "Knock them out",
-  skip: "Let them sit the week out",
 };
 const LMS_ALL_OUT_LABELS: Record<string, string> = {
   rollover: "No winner; the pot rolls into a new competition",
