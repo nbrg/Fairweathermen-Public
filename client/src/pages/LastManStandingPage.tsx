@@ -78,6 +78,13 @@ function opponentForSeason(
 //  - empty:   no pick (and still in) → a muted dash
 //  - hidden:  pick made but redacted until kickoff → a lock
 //  - pick:    the crest badge
+// Ref for the Team Selections grid: open it scrolled fully right so the latest
+// gameweek shows without scrolling. A module-level function keeps the ref
+// stable, so it runs once on mount and never fights the player's own scrolling.
+function scrollGridToLatest(el: HTMLDivElement | null) {
+  if (el) el.scrollLeft = el.scrollWidth;
+}
+
 function LmsSelectionCell({
   team,
   selection,
@@ -1266,7 +1273,7 @@ export default function LastManStandingPage() {
                       <CardTitle className="text-lg sm:text-xl">Team Selections</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <div className="overflow-x-auto">
+                      <div ref={scrollGridToLatest} className="overflow-x-auto" data-testid="lms-selections-grid">
                         <table className="w-full border-collapse border border-gray-300 text-xs sm:text-sm">
                           <thead>
                             <tr>

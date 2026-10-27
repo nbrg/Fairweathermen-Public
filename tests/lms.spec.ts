@@ -80,6 +80,25 @@ test.describe("Last Man Standing UI", () => {
     }
   });
 
+  test("the Team Selections table opens scrolled to the latest gameweek", async ({ page }) => {
+    // The seed only has two gameweeks, which fit on screen, so widen the
+    // table before the app renders to make the frame overflow on load.
+    await page.addInitScript(() => {
+      document.addEventListener("DOMContentLoaded", () => {
+        const style = document.createElement("style");
+        style.textContent = '[data-testid="lms-selections-grid"] table { min-width: 2000px; }';
+        document.head.appendChild(style);
+      });
+    });
+    await loginViaUi(page, CODES.alex);
+    await page.goto("/last-man-standing");
+    const grid = page.getByTestId("lms-selections-grid");
+    await expect(grid.getByText("GW2", { exact: true })).toBeVisible();
+    const m = await grid.evaluate((el) => ({ left: el.scrollLeft, width: el.clientWidth, full: el.scrollWidth }));
+    expect(m.full).toBeGreaterThan(m.width);
+    expect(m.left + m.width).toBeGreaterThanOrEqual(m.full - 1);
+  });
+
   test("a player can make a pick through the team picker", async ({ page }) => {
     // Blake has no selection yet (Casey picks via the API test above), so the
     // open gameweek offers the "Make your pick" button.
