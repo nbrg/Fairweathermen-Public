@@ -80,3 +80,25 @@ test.describe("Lawro Joker", () => {
     expect(res.status()).toBe(400);
   });
 });
+
+test.describe("Joker in the app", () => {
+  test("turning the Joker on shows its picker on Lawro without a reload", async ({ page }) => {
+    await page.goto("/create");
+    const res = await page.request.post("/api/group/create", {
+      data: { groupName: uniqueName(), adminName: "Owner", games: ["lms", "predictions"] },
+    });
+    expect(res.ok()).toBeTruthy();
+    // Start on Lawro and open the settings in-app, so going back is a client-side
+    // navigation (no reload) and the page must already see the new rule.
+    await page.goto("/lawro");
+    await expect(page.getByText("Your Joker", { exact: true })).toHaveCount(0);
+    await page.getByRole("link", { name: "Group settings" }).click();
+    await page.getByRole("switch", { name: "Joker" }).click();
+    await page.getByRole("button", { name: "Save rules" }).click();
+    await expect(page.getByText("Rules saved").first()).toBeVisible();
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\/lawro$/);
+    await expect(page.getByText("Your Joker", { exact: true })).toBeVisible();
+  });
+});

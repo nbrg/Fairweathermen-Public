@@ -105,7 +105,7 @@ function SelectField<T extends string>({
 // Owner-only page (/group-settings) to tune a group's LMS / Lawro rules and
 // grab the invite link. Members who aren't the admin see a read-only notice.
 export default function GroupSettings() {
-  const { group } = useGroup();
+  const { group, refreshSession } = useGroup();
   const { toast } = useToast();
   const [data, setData] = useState<RulesResponse | null>(null);
   const [rules, setRules] = useState<GroupRules | null>(null);
@@ -157,6 +157,8 @@ export default function GroupSettings() {
         return;
       }
       setRules(body.rules);
+      // Update the session too, so the game pages use the new rules right away.
+      void refreshSession();
       toast({ title: "Rules saved", description: "Your group's rules have been updated." });
     } finally {
       setSaving(false);
@@ -296,6 +298,7 @@ export default function GroupSettings() {
                   <p className="text-xs text-gray-500">Each player picks one of their predictions every gameweek as their Joker, and whatever it scores counts double.</p>
                 </div>
                 <Switch
+                  aria-label="Joker"
                   checked={rules.lawro.jokerEnabled}
                   onCheckedChange={(v) => setLawro("jokerEnabled", v)}
                   disabled={!canEdit}

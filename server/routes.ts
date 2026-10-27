@@ -2939,7 +2939,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const enabledGames = cleanGames(req.body?.enabledGames);
-      const buyIn = Math.max(0, Math.floor(Number(req.body?.buyIn ?? 0)) || 0);
+      const buyIn = Math.max(0, Math.floor(Number(req.body?.buyIn ?? 10)) || 0);
       const lmsAllOutRule = (LMS_ALL_OUT_RULES as readonly string[]).includes(req.body?.lmsAllOutRule)
         ? req.body.lmsAllOutRule
         : "rollover";

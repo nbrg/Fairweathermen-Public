@@ -16,7 +16,7 @@ export const groups = pgTable("groups", {
   // Per-group rules, configurable from the admin "Groups" screen.
   // buyIn: the stake each player puts in per competition, in whole currency
   // units (0 = just for bragging rights). Surfaced to the UI as the group's pot.
-  buyIn: integer("buy_in").notNull().default(0),
+  buyIn: integer("buy_in").notNull().default(10),
   // lmsAllOutRule: what happens in Last Man Standing when every remaining
   // player is knocked out in the same gameweek:
   //   "rollover" — the competition ends with no winner and a fresh one starts
@@ -100,7 +100,7 @@ export type GroupRules = {
   };
   lms: {
     // The buy-in / prize pot for a Last Man Standing competition. Bridged from
-    // the legacy `buyIn` column (default 0).
+    // the legacy `buyIn` column (default 10).
     buyIn: number;
     // How many lives a player has — i.e. how many losing picks it takes to knock
     // them out (default 1: one loss and you're gone).
@@ -128,7 +128,7 @@ export const DEFAULT_GROUP_RULES: GroupRules = {
     jokerEnabled: false,
   },
   lms: {
-    buyIn: 0,
+    buyIn: 10,
     lives: 1,
     allowTeamReuse: false,
     deadlineMinutesBeforeKickoff: 0,
