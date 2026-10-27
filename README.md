@@ -1,7 +1,7 @@
 # Fairweathermen
 
 A web app for running season-long Premier League games with a group of mates.
-One install hosts three separate games, each with its own pages and tables:
+One install hosts two separate games, each with its own pages and tables:
 
 - **Prediction League ("Lawro").** Predict the exact scoreline of every Premier
   League match, a gameweek at a time. You get 3 points for the exact score and 1
@@ -16,10 +16,16 @@ Live scores and fixtures come from [football-data.org](https://www.football-data
 Eliminations, leaderboards and reminders all happen on their own in the
 background.
 
-I built and run this for my own groups. This is the open version of it, with the
-private bits taken out, for two reasons: so a friend can spin up their own
-league, and so anyone curious about the code can read a real, running full-stack
-app rather than a toy. Nothing here points at my live deployment — see
+The live site at **[fairweathermen.com](https://fairweathermen.com)** runs from a
+private repo that I built and maintain for my own groups. **This is a slightly
+simplified, open version of that codebase** — the same app, with a couple of the
+games taken out (the private version also runs a golf tracker and a World Cup
+predictor) and every token, credential and third-party integration stripped out.
+Nothing here points at the live deployment.
+
+I keep it public for two reasons: so a friend can spin up their own league, and
+so anyone curious about the code can read a real, running full-stack app rather
+than a toy. To run it yourself, see
 [running your own copy](#running-your-own-copy).
 
 ## Stack
