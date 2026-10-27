@@ -56,7 +56,6 @@ export function eligibleTeamsForGameweek(matches: Match[], gameweek: number): Ma
 export async function assignRandomTeams(
   competition: LmsCompetition,
   gameweek: number,
-  allowTeamReuse = false,
 ): Promise<void> {
   // Don't assign teams for gameweeks before the competition started
   if (gameweek < competition.startGameweek) return;
@@ -81,12 +80,9 @@ export async function assignRandomTeams(
     const hasSelectionForGameweek = selections.some(s => s.gameweek === gameweek);
     if (hasSelectionForGameweek) continue;
 
-    // Teams this participant has already used are ineligible — unless the group
-    // allows reusing teams, in which case the whole pool is available.
+    // Teams this participant has already used are ineligible.
     const usedTeamIds = new Set(selections.map(s => s.teamId));
-    const availableTeamIds = allowTeamReuse
-      ? Array.from(eligible.keys())
-      : Array.from(eligible.keys()).filter(id => !usedTeamIds.has(id));
+    const availableTeamIds = Array.from(eligible.keys()).filter(id => !usedTeamIds.has(id));
     if (availableTeamIds.length === 0) continue;
 
     const randomTeamId = availableTeamIds[Math.floor(Math.random() * availableTeamIds.length)];
@@ -107,8 +103,7 @@ export async function assignRandomTeams(
 
 // Apply a group's "missed pick" rule to everyone with no selection for a locked
 // gameweek. Default is "random" (assign a team), which reproduces the app's
-// long-standing behaviour. "eliminate" knocks the no-show out; "skip" leaves
-// them alone (they sit the week out, staying in the competition).
+// long-standing behaviour. "eliminate" knocks the no-show out.
 export async function processMissedLmsPicks(
   competition: LmsCompetition,
   gameweek: number,
@@ -118,11 +113,8 @@ export async function processMissedLmsPicks(
   const policy = rules.lms.missedPickPolicy;
 
   if (policy === "random") {
-    await assignRandomTeams(competition, gameweek, rules.lms.allowTeamReuse);
+    await assignRandomTeams(competition, gameweek);
     return;
-  }
-  if (policy === "skip") {
-    return; // No pick, no penalty — they sit out this gameweek.
   }
 
   // "eliminate": knock out every active participant who has no pick this week.

@@ -77,8 +77,8 @@ A few things I'd point at if you're reading the code:
   group (`/create`), name it, pick its games, and become its admin; you get your
   login code and an invite link (`/join/<token>`) that hands each new player their
   own code. As the admin you tune the group's rules at `/group-settings` — Lawro
-  points, both games' deadline, the missed-pick policy, and LMS lives, buy-in,
-  team reuse and what happens when everyone goes out together. Every rule defaults
+  points, both games' deadline, the missed-pick policy, and LMS lives, buy-in
+  and what happens when everyone goes out together. Every rule defaults
   to the original behaviour, so existing groups are unchanged until you edit one.
 
 There's a fuller tour of the architecture, the conventions, and a few mistakes

@@ -332,17 +332,6 @@ export default function GroupSettings() {
                 max={10}
                 disabled={!canEdit}
               />
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <Label>Allow reusing teams</Label>
-                  <p className="text-xs text-gray-500">Let players pick the same team in more than one week.</p>
-                </div>
-                <Switch
-                  checked={rules.lms.allowTeamReuse}
-                  onCheckedChange={(v) => setLms("allowTeamReuse", v)}
-                  disabled={!canEdit}
-                />
-              </div>
               <NumberField
                 label="Deadline before first kick-off"
                 hint="How long before the gameweek's first match selections lock. 0 = at kick-off."
@@ -361,7 +350,6 @@ export default function GroupSettings() {
                 options={[
                   { value: "random", label: "Assign a random team" },
                   { value: "eliminate", label: "Knock them out" },
-                  { value: "skip", label: "Let them sit the week out" },
                 ]}
               />
               <SelectField

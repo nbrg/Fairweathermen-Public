@@ -161,10 +161,11 @@ Anyone can create their own group from the public pages (no admin key needed):
   `optimizedQueries.ts` scoring + `HomePage.tsx` tallies), Lawro/LMS deadline offset (minutes before
   first kickoff), Lawro missed-pick policy (blank/random — random is filled by
   `server/lawroMissedPicks.ts` off the per-minute processor), LMS buy-in, lives (cumulative-loss
-  derivation in `lmsProcessor.ts`, idempotent), allow team reuse, LMS missed-pick policy
-  (random/eliminate/skip in `autoLmsProcessor.ts`) and all-out policy — the existing `revive`
-  alongside `rollover`/`co_winners`/`no_winner`. Session payload (`/api/group/me`) carries the
-  resolved `rules` + `isOwner`.
+  derivation in `lmsProcessor.ts`, idempotent), LMS missed-pick policy
+  (random/eliminate in `autoLmsProcessor.ts`) and all-out policy — the existing `revive`
+  alongside `rollover`/`co_winners`/`no_winner`. **Team reuse is never allowed** and there is no
+  "sit the week out" missed-pick option (both deliberately left out). Session payload
+  (`/api/group/me`) carries the resolved `rules` + `isOwner`.
 
 ## Environment variables
 

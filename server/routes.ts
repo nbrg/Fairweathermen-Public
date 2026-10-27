@@ -2235,12 +2235,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const participants = await storage.getLmsParticipantsByCompetition(competition.id);
       const userParticipant = participants.find(p => p.userId === userId);
       
-      // Get user's previous selections if they're a participant, otherwise empty
-      // set. When the group allows reusing teams, nothing is ever "used up", so
-      // leave the set empty and every team stays selectable.
-      const availRules = await getGroupRules(competition.groupId);
+      // Get user's previous selections if they're a participant, otherwise empty set
       let usedTeamIds = new Set<number>();
-      if (userParticipant && !availRules.lms.allowTeamReuse) {
+      if (userParticipant) {
         const userSelections = await storage.getLmsSelectionsByParticipant(userParticipant.id);
         usedTeamIds = new Set(userSelections.map(s => s.teamId));
       }
@@ -2300,11 +2297,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Participant is eliminated from competition" });
       }
       
-      // Check if team was already used by this participant — unless the group
-      // allows reusing teams, in which case repeats are fine.
+      // Check if team was already used by this participant (teams can never be reused)
       const participantSelections = await storage.getLmsSelectionsByParticipant(participantId);
       const teamAlreadyUsed = participantSelections.some(s => s.teamId === teamId);
-      if (teamAlreadyUsed && !selectRules.lms.allowTeamReuse) {
+      if (teamAlreadyUsed) {
         return res.status(400).json({ error: "Team already selected in previous gameweek" });
       }
       

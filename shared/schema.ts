@@ -69,8 +69,7 @@ export type LawroMissedPolicy = "blank" | "random";
 // What happens to an LMS player who hasn't picked when the deadline passes.
 //  - "random": a random eligible team is assigned (current behaviour).
 //  - "eliminate": missing a pick knocks them out.
-//  - "skip": they neither pick nor get eliminated — they sit the week out.
-export type LmsMissedPolicy = "random" | "eliminate" | "skip";
+export type LmsMissedPolicy = "random" | "eliminate";
 
 // What happens when every remaining LMS player is knocked out in the same
 // gameweek.
@@ -105,9 +104,6 @@ export type GroupRules = {
     // How many lives a player has — i.e. how many losing picks it takes to knock
     // them out (default 1: one loss and you're gone).
     lives: number;
-    // Whether a player may pick the same team in more than one gameweek. The
-    // classic rule forbids it (default false); some circles allow it.
-    allowTeamReuse: boolean;
     // Minutes before the gameweek's first kick-off that selections lock
     // (default 0 — locks exactly at the first kick-off).
     deadlineMinutesBeforeKickoff: number;
@@ -130,7 +126,6 @@ export const DEFAULT_GROUP_RULES: GroupRules = {
   lms: {
     buyIn: 10,
     lives: 1,
-    allowTeamReuse: false,
     deadlineMinutesBeforeKickoff: 0,
     missedPickPolicy: "random",
     allOutPolicy: "rollover",
@@ -138,7 +133,7 @@ export const DEFAULT_GROUP_RULES: GroupRules = {
 };
 
 export const LAWRO_MISSED_POLICIES: readonly LawroMissedPolicy[] = ["blank", "random"];
-export const LMS_MISSED_POLICIES: readonly LmsMissedPolicy[] = ["random", "eliminate", "skip"];
+export const LMS_MISSED_POLICIES: readonly LmsMissedPolicy[] = ["random", "eliminate"];
 export const LMS_ALL_OUT_POLICIES: readonly LmsAllOutPolicy[] = [
   "rollover",
   "revive",
@@ -177,8 +172,6 @@ export function resolveGroupRules(stored: Partial<GroupRules> | null | undefined
     lms: {
       buyIn: clampInt(stored?.lms?.buyIn, d.lms.buyIn, 0, 100000),
       lives: clampInt(stored?.lms?.lives, d.lms.lives, 1, 10),
-      allowTeamReuse:
-        typeof stored?.lms?.allowTeamReuse === "boolean" ? stored.lms.allowTeamReuse : d.lms.allowTeamReuse,
       deadlineMinutesBeforeKickoff: clampInt(
         stored?.lms?.deadlineMinutesBeforeKickoff,
         d.lms.deadlineMinutesBeforeKickoff,
