@@ -8,13 +8,27 @@ test.beforeAll(reseed);
 // The nav shows a tab for every game the person's groups offer. The demo group
 // plays Lawro and LMS, so both tabs should be there and reachable.
 test.describe("navigation", () => {
-  test("shows the games the group plays", async ({ page }) => {
+  test("shows the games the group plays", async ({ page, isMobile }) => {
     await loginViaUi(page, CODES.alex);
-    // Games hosted by the active group are client-side nav links. The compact
-    // nav labels Last Man Standing "LMS".
+    // Games hosted by the active group are client-side nav links.
     await expect(page.getByRole("link", { name: "Lawro" })).toBeVisible();
+    // The compact nav labels Last Man Standing "LMS".
     await expect(page.getByRole("link", { name: /^(LMS|Last Man Standing)$/ })).toBeVisible();
-    await expect(page.getByRole("navigation", { name: "Games" })).toBeVisible();
+    // Phones get the games in the bottom nav; wider screens in the header.
+    await expect(page.getByRole("navigation", { name: isMobile ? "Main" : "Games" })).toBeVisible();
+  });
+
+  test("someone with only one game gets no game switcher", async ({ page, isMobile }) => {
+    // Creating a group signs the caller in; page.request shares the page's cookies.
+    const res = await page.request.post("/api/group/create", {
+      data: { groupName: `Solo ${Date.now()}`, adminName: "Solo", games: ["lms"] },
+    });
+    expect(res.ok(), `create failed: ${res.status()}`).toBeTruthy();
+    await page.goto("/");
+    await expect(page.getByRole("link", { name: "Home" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Games" })).toHaveCount(0);
+    // On a phone the bottom nav still shows their one game next to Settings.
+    await expect(page.getByRole("link", { name: /^(LMS|Last Man Standing)$/ })).toHaveCount(isMobile ? 1 : 0);
   });
 
   test("the LMS page loads the current competition's players", async ({ page }) => {
@@ -34,12 +48,6 @@ test.describe("navigation", () => {
   test("an unknown route shows the 404 page", async ({ page }) => {
     await loginViaUi(page, CODES.alex);
     await page.goto("/no-such-page");
-    await expect(page.getByText(/404/)).toBeVisible();
-  });
-
-  test("the season-predictions page is gone", async ({ page }) => {
-    await loginViaUi(page, CODES.alex);
-    await page.goto("/plpredictions");
     await expect(page.getByText(/404/)).toBeVisible();
   });
 

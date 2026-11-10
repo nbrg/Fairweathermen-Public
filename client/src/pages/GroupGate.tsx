@@ -24,7 +24,7 @@ export default function GroupGate() {
   }
 
   return (
-    <div className="flex min-h-screen min-h-[100dvh] flex-col bg-primary px-6 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] text-white">
+    <div className="flex min-h-screen min-h-[100dvh] flex-col bg-header px-6 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] text-white">
       <div className="mx-auto flex w-full max-w-sm flex-1 flex-col justify-center gap-6 py-8">
         <div>
           <img

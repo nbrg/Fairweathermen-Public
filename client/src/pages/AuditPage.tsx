@@ -3,7 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { isOwnUsername } from "@/lib/utils";
 import { GroupMultiSelect } from "@/components/GroupMultiSelect";
 import { AdminGate } from "@/components/AdminGate";
-import { AdminNav } from "@/components/AdminNav";
+import { describeLocation, LOCATION_HINT } from "@shared/ipLocation";
+import { AdminLayout } from "@/components/AdminNav";
+import { auditCategory } from "@shared/activityEvents";
 
 type AuditEvent = {
   id: string;
@@ -88,16 +90,37 @@ function formatDateTime(iso: string): string {
   }).format(d);
 }
 
-function formatLocation(city: string | null, country: string | null): string {
-  const parts = [city, country].filter(Boolean);
-  return parts.length > 0 ? parts.join(", ") : "Unknown location";
-}
-
 const TYPE_LABEL: Record<string, string> = {
   lms_selection: "LMS",
   prediction_set: "Lawro",
   prediction_change: "Lawro",
   prediction_delete: "Lawro (cleared)",
+  rule_change_acknowledged: "Rules",
+  // Settings, reminders and feature usage (server/auditExtras.ts).
+  settings_rules: "Rules changed",
+  player_renamed: "Players",
+  player_removed: "Players",
+  invite_reset: "Invite link",
+  login_code_reset: "Players",
+  lms_player_added: "Players",
+  lms_player_sat_out: "Players",
+  push_enabled: "Reminders on",
+  push_disabled: "Reminders off",
+  push_lead_changed: "Reminder times",
+  setting_changed: "Device setting",
+  push_sent: "Reminder sent",
+  push_opened: "Reminder opened",
+  push_dismissed: "Reminder dismissed",
+  wheel_view: "LMS wheel",
+  fixture_select: "Fixtures",
+  chart_interaction: "Tendencies",
+};
+
+// Colour by category for the newer row types.
+const CATEGORY_COLOR: Record<string, string> = {
+  settings: "bg-sky-100 text-sky-800",
+  reminders: "bg-rose-100 text-rose-800",
+  usage: "bg-teal-100 text-teal-800",
 };
 
 const TYPE_COLOR: Record<string, string> = {
@@ -105,7 +128,19 @@ const TYPE_COLOR: Record<string, string> = {
   prediction_set: "bg-amber-100 text-amber-800",
   prediction_change: "bg-amber-100 text-amber-800",
   prediction_delete: "bg-gray-100 text-gray-600",
+  rule_change_acknowledged: "bg-indigo-100 text-indigo-800",
 };
+
+// The game filter: which event types each option shows.
+const GAME_FILTERS: { value: string; label: string; match: (type: string) => boolean }[] = [
+  { value: "all", label: "All events", match: () => true },
+  { value: "lms", label: "LMS", match: (t) => t === "lms_selection" },
+  { value: "lawro", label: "Lawro", match: (t) => t.startsWith("prediction_") },
+  { value: "rules", label: "Rules", match: (t) => t === "rule_change_acknowledged" || t === "settings_rules" },
+  { value: "settings", label: "Settings", match: (t) => auditCategory(t) === "settings" },
+  { value: "reminders", label: "Reminders", match: (t) => auditCategory(t) === "reminders" },
+  { value: "usage", label: "Wheel / Fixtures / Charts", match: (t) => auditCategory(t) === "usage" },
+];
 
 export default function AuditPage() {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("adminApiKey") || "");
@@ -113,6 +148,7 @@ export default function AuditPage() {
   const [keyError, setKeyError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number | null> | null>(null);
   const [playerQuery, setPlayerQuery] = useState("");
+  const [game, setGame] = useState("all");
 
   const { data: events, isLoading, error } = useQuery<AuditEvent[]>({
     queryKey: ["/api/admin/audit", apiKey],
@@ -151,12 +187,13 @@ export default function AuditPage() {
   // Your own actions are hidden by default; searching a player name (e.g.
   // "Alex") shows whoever matches, which is how you surface your own again.
   const visibleEvents = useMemo(() => {
-    let list = (events ?? []).filter((e) => effectiveSelected.has(e.groupId));
+    const gameFilter = GAME_FILTERS.find((f) => f.value === game) ?? GAME_FILTERS[0];
+    let list = (events ?? []).filter((e) => effectiveSelected.has(e.groupId) && gameFilter.match(e.type));
     list = query
       ? list.filter((e) => (e.username ?? "").toLowerCase().includes(query))
       : list.filter((e) => !isOwnUsername(e.username));
     return list;
-  }, [events, effectiveSelected, query]);
+  }, [events, effectiveSelected, query, game]);
 
   if (!authed) {
     return (
@@ -174,21 +211,32 @@ export default function AuditPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      <main className="container mx-auto px-4 py-6">
-        <AdminNav />
+    <AdminLayout>
         <div className="mb-4">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
               <h1 className="text-2xl font-bold text-primary">Audit log</h1>
               <p className="text-sm text-gray-600">
-                Every pick and change across all groups. Newest first. Refreshes
-                every 30s.
+                Every pick and change across all groups, plus rule-change acknowledgements, settings changes (rules, reminders, players,
+                theme), reminders sent/opened/dismissed, and LMS wheel, Fixtures and Tendencies chart use. Newest first. Refreshes every 30s.
               </p>
+              <p className="mt-1 text-xs text-gray-500">{LOCATION_HINT}</p>
             </div>
             <GroupMultiSelect options={groupOptions} selected={effectiveSelected} onChange={setSelected} />
           </div>
-          <div className="mt-3 flex items-center gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Filter by game"
+              value={game}
+              onChange={(e) => setGame(e.target.value)}
+              className="rounded-md border border-gray-300 px-2 py-1.5 text-sm bg-card focus:outline-none focus:ring-2 focus:ring-primary/40"
+            >
+              {GAME_FILTERS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
             <input
               type="search"
               list="audit-players"
@@ -218,27 +266,27 @@ export default function AuditPage() {
         </div>
 
         {isLoading && (
-          <div className="bg-white rounded-md border p-6 text-sm text-gray-500">
+          <div className="bg-card rounded-md border p-6 text-sm text-gray-500">
             Loading…
           </div>
         )}
         {error && (
-          <div className="bg-white rounded-md border border-red-200 p-6 text-sm text-red-700">
+          <div className="bg-card rounded-md border border-red-200 p-6 text-sm text-red-700">
             {(error as Error).message}
           </div>
         )}
         {events && events.length === 0 && (
-          <div className="bg-white rounded-md border p-6 text-sm text-gray-500">
-            No pick activity recorded yet.
+          <div className="bg-card rounded-md border p-6 text-sm text-gray-500">
+            No audit activity recorded yet.
           </div>
         )}
         {events && events.length > 0 && visibleEvents.length === 0 && (
-          <div className="bg-white rounded-md border p-6 text-sm text-gray-500">
+          <div className="bg-card rounded-md border p-6 text-sm text-gray-500">
             {query ? `No activity from a player matching "${playerQuery.trim()}".` : "No activity from anyone else (your own activity is hidden)."}
           </div>
         )}
         {visibleEvents.length > 0 && (
-          <div className="bg-white rounded-md border overflow-x-auto">
+          <div className="bg-card rounded-md border overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-200">
                 <tr>
@@ -261,8 +309,8 @@ export default function AuditPage() {
                       </td>
                       <td className="p-2">
                         <span
-                          className={`inline-flex items-center rounded px-2 py-0.5 text-[11px] font-medium ${
-                            TYPE_COLOR[e.type] ?? "bg-gray-100 text-gray-700"
+                          className={`inline-flex items-center whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-medium ${
+                            TYPE_COLOR[e.type] ?? CATEGORY_COLOR[auditCategory(e.type)] ?? "bg-gray-100 text-gray-700"
                           }`}
                         >
                           {TYPE_LABEL[e.type] ?? e.type}
@@ -274,9 +322,11 @@ export default function AuditPage() {
                       <td className="p-2 text-gray-900 font-medium whitespace-nowrap">
                         {e.username}
                       </td>
-                      <td className="p-2 text-gray-700">{e.summary}</td>
+                      <td className="p-2 text-gray-700">
+                        <div>{e.summary}</div>
+                      </td>
                       <td className="p-2 text-xs text-gray-600 whitespace-nowrap">
-                        <div>{formatLocation(e.city, e.country)}</div>
+                        <div>{describeLocation(e.ipAddress, e.city, e.country)}</div>
                         <div className="text-gray-400">{e.ipAddress}</div>
                       </td>
                       <td className="p-2 text-xs text-gray-600 whitespace-nowrap">
@@ -291,7 +341,6 @@ export default function AuditPage() {
             </table>
           </div>
         )}
-      </main>
-    </div>
+    </AdminLayout>
   );
 }

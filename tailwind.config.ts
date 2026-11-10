@@ -1,4 +1,6 @@
 import type { Config } from "tailwindcss";
+import plugin from "tailwindcss/plugin";
+import { themeColorUtilities, themePaletteVariables } from "./client/src/lib/themePalette";
 
 export default {
   darkMode: ["class"],
@@ -24,35 +26,14 @@ export default {
       colors: {
         // The Matchday palette, applied app-wide: Tailwind's grays become cool,
         // faintly purple neutrals and its blues become the brand violet, so the
-        // many pages styled with gray-*/blue-* utilities match the new theme
-        // without restyling each one by hand.
-        gray: {
-          50: "#F8F7FB",
-          100: "#F1EFF5",
-          200: "#E7E5EE",
-          300: "#DCD9E4",
-          400: "#A8A3B3",
-          500: "#6E6879",
-          600: "#57515F",
-          700: "#423D4A",
-          800: "#2C2833",
-          900: "#1B1722",
-          950: "#100D15",
-        },
-        blue: {
-          50: "#F4F0FD",
-          100: "#EAE2FB",
-          200: "#D6C8F6",
-          300: "#B9A2EE",
-          400: "#9775E2",
-          500: "#7A4FD3",
-          600: "#6538BD",
-          700: "#522D9B",
-          800: "#42257C",
-          900: "#2E1A57",
-          950: "#1E1139",
-        },
+        // many pages styled with gray-*/blue-* utilities match the theme without
+        // restyling each one by hand. Every shade (these and the status colours
+        // the pages use) reads a CSS variable, and dark mode flips the scale —
+        // see themePalette below — so a light tint becomes a dark one and dark
+        // text becomes light, without a dark: variant on every class.
+        ...themeColorUtilities,
         background: "hsl(var(--background))",
+        header: "hsl(var(--header))",
         foreground: "hsl(var(--foreground))",
         card: {
           DEFAULT: "hsl(var(--card))",
@@ -127,5 +108,10 @@ export default {
       },
     },
   },
-  plugins: [require("tailwindcss-animate"), require("@tailwindcss/typography")],
+  plugins: [
+    require("tailwindcss-animate"),
+    require("@tailwindcss/typography"),
+    // Light values on :root, flipped values under .dark (see themePalette.ts).
+    plugin(({ addBase }) => addBase(themePaletteVariables())),
+  ],
 } satisfies Config;

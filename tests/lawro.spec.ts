@@ -99,6 +99,14 @@ test.describe("Lawro predictions", () => {
       "data-state",
       "active",
     );
+    // Blake and Casey missed the GW1 exact score, so the drought chart shows,
+    // with a toggle between the longest run and the current one.
+    await expect(page.getByRole("heading", { name: "Longest drought" })).toBeVisible();
+    await page.getByRole("button", { name: "Current", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Current drought" })).toBeVisible();
+    // Alex was the only one with GW1's exact score (Blake also had the result),
+    // so the lone-call chart shows.
+    await expect(page.getByRole("heading", { name: "Only One Who Saw It" })).toBeVisible();
   });
 
   test("you can submit a prediction for an open gameweek", async ({ page }) => {
@@ -110,11 +118,17 @@ test.describe("Lawro predictions", () => {
     const input = page.locator('[data-testid^="pred-input-"]');
     await expect(input.first()).toBeVisible();
 
+    // The save fires as soon as a complete "X-Y" exists. Wait for that request
+    // to come back before reloading: a fixed sleep raced it on slower browsers
+    // (WebKit in CI), so the reload sometimes beat the save.
+    const saved = page.waitForResponse(
+      (r) =>
+        /^\/api\/predictions(\/\d+)?$/.test(new URL(r.url()).pathname) &&
+        ["POST", "PATCH", "PUT"].includes(r.request().method()),
+    );
     await input.first().fill("3-0");
     await input.first().blur();
-    // The save fires as soon as a complete "X-Y" exists; give it a moment, then
-    // reload and confirm it stuck.
-    await page.waitForTimeout(600);
+    expect((await saved).ok()).toBeTruthy();
     await page.reload();
     const reloaded = page.locator('[data-testid^="pred-input-"]');
     await expect(reloaded.first()).toHaveValue("3-0");
@@ -154,5 +168,42 @@ test.describe("Lawro predictions", () => {
     // Finished gameweek: the editable input is gone and scores show as badges.
     await expect(page.locator('[data-testid^="pred-input-"]')).toHaveCount(0);
     await expect(page.getByText("2-1").first()).toBeVisible(); // Alex's revealed pick
+  });
+
+  // Once a round is live (deadline passed, nobody can still predict), the grid
+  // flips so each match is a column and each player a row: everyone's pick for
+  // one game reads down a single column. Before the deadline it stays one row
+  // per match with a column per player, so you fill in your own column.
+  test("the grid is one row per match while picks are open", async ({ page }) => {
+    await loginViaUi(page, CODES.alex);
+    await page.goto("/lawro");
+    await expect(page.getByText(/GW2 Predictions/)).toBeVisible();
+    const grid = page.getByTestId("lawro-grid");
+    await expect(grid).toHaveAttribute("data-layout", "matches-as-rows");
+    const header = grid.locator("thead th");
+    await expect(header.first()).toHaveText("Match");
+    await expect(grid.locator("thead")).toContainText("Blake");
+    await expect(grid.locator("tbody tr").first().locator("td").first()).toContainText("vs");
+  });
+
+  test("once the round is live, each match is a column and each player a row", async ({ page }) => {
+    await loginViaUi(page, CODES.alex);
+    await page.goto("/lawro");
+    await page.getByRole("button", { name: "Previous gameweek" }).click(); // GW1, locked
+    await expect(page.getByText(/GW1 Predictions/)).toBeVisible();
+    const grid = page.getByTestId("lawro-grid");
+    await expect(grid).toHaveAttribute("data-layout", "matches-as-columns");
+    await expect(grid.locator("thead th").first()).toHaveText("Player");
+    const rows = grid.locator("tbody tr");
+    await expect(rows).toHaveCount(3);
+    // Your own row first, then everyone else alphabetically.
+    await expect(rows.nth(0).locator("th")).toContainText("Alex");
+    await expect(rows.nth(1).locator("th")).toContainText("Blake");
+    await expect(rows.nth(2).locator("th")).toContainText("Casey");
+    // The match is a column header, with its result; picks sit under it.
+    await expect(grid.locator("thead")).toContainText("2 - 1");
+    await expect(rows.nth(0).locator("td").first()).toHaveText("2-1");
+    await expect(rows.nth(1).locator("td").first()).toHaveText("1-0");
+    await expect(rows.nth(2).locator("td").first()).toHaveText("0-2");
   });
 });

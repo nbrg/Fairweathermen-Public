@@ -71,6 +71,65 @@ test.describe("Last Man Standing", () => {
   });
 });
 
+// The pick endpoints used to compare the request's gameweek/teamId against the
+// database with ===, so sending them as strings ("1" instead of 1) slipped past
+// the deadline lock and the no-reuse rule. And the competitions history feed
+// handed out everyone's open-gameweek picks before the deadline.
+test.describe("Last Man Standing pick integrity", () => {
+  test("a pick for a finished gameweek is refused even if the gameweek is sent as text", async ({ request }) => {
+    const me = await loginViaApi(request, CODES.blake);
+    const { mine } = await getMyParticipant(request, me.user.id);
+    const cityId = await teamIdByName(request, "Manchester City");
+
+    const res = await request.post("/api/lms/select-team", {
+      data: { teamId: cityId, participantId: mine.id, gameweek: "1" },
+    });
+    expect(res.status()).toBe(400);
+  });
+
+  test("a used team can't be picked again by sending its id as text", async ({ request }) => {
+    const me = await loginViaApi(request, CODES.alex);
+    const { mine } = await getMyParticipant(request, me.user.id);
+    const arsenalId = await teamIdByName(request, "Arsenal");
+
+    const res = await request.post("/api/lms/select-team", {
+      data: { teamId: String(arsenalId), participantId: mine.id, gameweek: 2 },
+    });
+    expect(res.status()).toBe(400);
+  });
+
+  test("other players' open-gameweek picks stay hidden on every LMS endpoint", async ({ playwright, baseURL }) => {
+    const casey = await playwright.request.newContext({ baseURL });
+    const caseyMe = await loginViaApi(casey, CODES.casey);
+    const { mine: caseyP } = await getMyParticipant(casey, caseyMe.user.id);
+    const cityId = await teamIdByName(casey, "Manchester City");
+    const pick = await casey.post("/api/lms/select-team", {
+      data: { teamId: cityId, participantId: caseyP.id, gameweek: 2 },
+    });
+    expect(pick.ok(), `Casey pick: ${pick.status()} ${await pick.text()}`).toBeTruthy();
+    await casey.dispose();
+
+    const alex = await playwright.request.newContext({ baseURL });
+    await loginViaApi(alex, CODES.alex);
+    const current = await (await alex.get("/api/lms/current-competition")).json();
+    const all = await (await alex.get("/api/lms/competitions")).json();
+    const comps = [current, ...all];
+    let seen = 0;
+    for (const comp of comps) {
+      const p = comp.participants.find((x: any) => x.id === caseyP.id);
+      if (!p) continue;
+      const gw2 = p.selections.find((s: any) => s.gameweek === 2);
+      expect(gw2, "Casey's GW2 pick should show as made").toBeTruthy();
+      seen++;
+      expect(gw2.hidden).toBe(true);
+      expect(gw2.teamId).toBeNull();
+      expect(gw2.matchId ?? null).toBeNull();
+    }
+    expect(seen).toBe(2);
+    await alex.dispose();
+  });
+});
+
 test.describe("Last Man Standing UI", () => {
   test("the page shows the roster and the open gameweek", async ({ page }) => {
     await loginViaUi(page, CODES.alex);
@@ -80,7 +139,7 @@ test.describe("Last Man Standing UI", () => {
     }
   });
 
-  test("the Team Selections table opens scrolled to the latest gameweek", async ({ page }) => {
+  test("the Team selections table opens scrolled to the latest gameweek", async ({ page }) => {
     // The seed only has two gameweeks, which fit on screen, so widen the
     // table before the app renders to make the frame overflow on load.
     await page.addInitScript(() => {
@@ -127,6 +186,14 @@ test.describe("Last Man Standing UI", () => {
       await expect(page.getByRole("tab", { name })).toHaveAttribute("data-state", "active");
       await expect(page.getByText(/^404/)).toHaveCount(0);
     }
+  });
+
+  test("the Rules tab explains a rollover with the group's buy-in", async ({ page }) => {
+    await loginViaUi(page, CODES.alex);
+    await page.goto("/last-man-standing");
+    await page.getByRole("tab", { name: "Rules" }).click();
+    await expect(page.getByText(/everyone is back in for the next competition/i)).toBeVisible();
+    await expect(page.getByText(/pays another £\d+ for the next competition/)).toBeVisible();
   });
 
   test("the Stats tab counts the Round 1 exits", async ({ page }) => {

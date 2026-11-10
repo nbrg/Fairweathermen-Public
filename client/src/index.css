@@ -24,6 +24,7 @@ body {
   --border: 258 16% 91%;
   --input: 258 14% 86%;
   --primary: 273 68% 12%; /* Premier League purple */
+  --header: 273 68% 12%; /* the purple site header + safe-area strips */
   --primary-foreground: 0 0% 100%;
   --secondary: 144 72% 50%; /* Premier League green */
   --secondary-foreground: 273 68% 12%;
@@ -45,27 +46,55 @@ body {
   --status-incorrect: 0 84% 60%;
 }
 
+/* Dark mode: <html class="dark">, set by next-themes from the Light / Dark /
+   Auto choice (client/src/lib/theme.tsx). A purple-black ground with lifted
+   cards; the brand purple is lightened enough to work as a button fill. The
+   gray/blue/red/green… scales flip separately (client/src/lib/themePalette.ts). */
 .dark {
-  --background: 240 10% 3.9%;
-  --foreground: 0 0% 98%;
-  --muted: 240 3.7% 15.9%;
-  --muted-foreground: 240 5% 64.9%;
-  --popover: 240 10% 3.9%;
-  --popover-foreground: 0 0% 98%;
-  --card: 240 10% 3.9%;
-  --card-foreground: 0 0% 98%;
-  --border: 240 3.7% 15.9%;
-  --input: 240 3.7% 15.9%;
-  --primary: 273 68% 12%;
-  --primary-foreground: 0 0% 98%;
-  --secondary: 144 72% 50%;
-  --secondary-foreground: 273 68% 12%;
-  --accent: 273 39% 45%;
-  --accent-foreground: 0 0% 98%;
-  --destructive: 0 62.8% 30.6%;
-  --destructive-foreground: 0 0% 98%;
-  --ring: 240 4.9% 83.9%;
+  color-scheme: dark;
+  --background: 268 34% 6%;
+  --foreground: 270 20% 94%;
+  --muted: 268 24% 15%;
+  --muted-foreground: 266 12% 66%;
+  --popover: 268 28% 11%;
+  --popover-foreground: 270 20% 94%;
+  --card: 268 28% 10%;
+  --card-foreground: 270 20% 94%;
+  --border: 268 22% 19%;
+  --input: 268 20% 26%;
+  --primary: 272 46% 26%;
+  --primary-foreground: 0 0% 100%;
+  --primary-text: 272 85% 82%;
+  --header: 270 40% 9%;
+  --secondary: 144 62% 45%;
+  --secondary-foreground: 273 68% 10%;
+  --accent: 273 50% 62%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 56%;
+  --destructive-foreground: 0 0% 100%;
+  --ring: 273 60% 70%;
+  --chart-1: 272 85% 78%;
+  --chart-2: 144 62% 50%;
+  --chart-3: 273 50% 62%;
+  --chart-4: 0 84% 65%;
+  --chart-5: 268 20% 30%;
 }
+
+/* The brand purple is near-black, so as a text colour it disappears on a dark
+   card: lift it to a light violet. Elements that keep a light fill in dark
+   mode (white pills, the green accent) keep the dark purple text. */
+.dark .text-primary:not(.bg-white):not([class*="bg-secondary"]),
+.dark .hover\:text-primary:hover:not(.bg-white) {
+  color: hsl(var(--primary-text));
+}
+.dark .\!text-primary {
+  color: hsl(var(--primary-text)) !important;
+}
+.dark .border-primary {
+  border-color: hsl(var(--primary-text) / 0.7);
+}
+
+
 
 @layer base {
   * {
@@ -75,6 +104,15 @@ body {
   body {
     @apply font-sans antialiased bg-background text-foreground;
     -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Unstyled native fields would otherwise get the browser's grey dark-mode
+     fill; any bg-* utility on a field still wins (utilities come later). */
+  .dark input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .dark select,
+  .dark textarea {
+    background-color: hsl(var(--card));
+    border-color: hsl(var(--input));
   }
 }
 
@@ -88,6 +126,26 @@ body {
   .eyebrow {
     @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
+}
+
+/* Charts (recharts) draw their grid, axis text and tooltip in fixed light
+   colours; give them the theme's in dark mode. */
+.dark .recharts-cartesian-grid line {
+  stroke: hsl(var(--border));
+}
+.dark .recharts-cartesian-axis-line,
+.dark .recharts-cartesian-axis-tick-line {
+  stroke: hsl(var(--muted-foreground) / 0.5);
+}
+.dark .recharts-cartesian-axis-tick-value {
+  fill: hsl(var(--muted-foreground));
+}
+.dark .recharts-default-tooltip {
+  background-color: hsl(var(--popover)) !important;
+  border-color: hsl(var(--border)) !important;
+}
+.dark .recharts-tooltip-cursor {
+  fill: hsl(var(--muted) / 0.6);
 }
 
 /* Freeze the first (label) column of a horizontally scrolling table: put

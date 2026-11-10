@@ -11,10 +11,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Runners are pinned to ubuntu-24.04: ubuntu-latest moved to 26.04, which the
+  # pinned Playwright can't install browsers on.
   # Decide which specs this change needs (see tests/affected.mjs). Pushes to
   # main and manual runs (Actions > CI > Run workflow) always run everything.
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       specs: ${{ steps.affected.outputs.specs }}
     steps:
@@ -44,7 +46,7 @@ jobs:
           echo "specs=$specs"
 
   typecheck:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -57,7 +59,7 @@ jobs:
   # One job per browser profile, in parallel, each with its own database.
   e2e:
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -172,7 +174,7 @@ jobs:
   test:
     if: ${{ always() }}
     needs: [typecheck, e2e]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: All checks passed
         env:

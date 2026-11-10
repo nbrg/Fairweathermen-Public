@@ -1,20 +1,24 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, X } from "lucide-react";
+import { Check, Copy, EyeOff, MessageCircle, Trash2, X } from "lucide-react";
+import { NAV_HIDDEN_GAMES } from "@shared/navGames";
+import { SITE_URL, welcomeMessage } from "@shared/welcomeMessage";
+import type { GroupRules } from "@shared/schema";
 
-import Header from "@/components/Header";
-import Footer from "@/components/Footer";
-import { AdminNav } from "@/components/AdminNav";
+import { AdminLayout, AdminPageTitle } from "@/components/AdminNav";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { AdminDeleteDialog, type DeleteTarget } from "@/components/AdminDeleteDialog";
 
 type Player = {
   id: number;
   username: string;
   groupId: number;
   inLms: boolean;
+  // Added after the running LMS competition started: joins the next one.
+  lmsNext: boolean;
   loginCode: string | null;
   // Per-person game-visibility override. null = inherit the group's games.
   enabledGames: string[] | null;
@@ -30,26 +34,30 @@ type GroupWithPlayers = {
   slug: string;
   name: string;
   enabledGames: string[];
-  buyIn: number;
-  lmsAllOutRule: string;
+  rules: GroupRules;
   hasActiveLms: boolean;
+  // The running LMS competition; `open` = its first deadline hasn't passed,
+  // so new players still go straight into it.
+  lms: { name: string; startGameweek: number; currentGameweek: number; open: boolean } | null;
   players: Player[];
 };
 
-const ALL_GAMES = ["lms", "predictions"] as const;
+// The player just added, shown with their code until dismissed.
+type AddedPlayer = { groupId: number; username: string; loginCode: string | null; message: string };
 
-const ALL_OUT_RULES: { value: string; label: string }[] = [
-  { value: "rollover", label: "Rollover — no winner, a fresh competition starts" },
-  { value: "revive", label: "Revive — everyone gets another life, play continues" },
-];
-
-// Remembered per device so the admin key only has to be entered once.
-const ADMIN_KEY_STORAGE = "fwm_admin_key";
+// The same key every admin page reads, so it only has to be entered once per
+// device. "wc_admin_key" is where this page used to keep it.
+const ADMIN_KEY_STORAGE = "adminApiKey";
+const LEGACY_KEY_STORAGE = "wc_admin_key";
 
 function useAdminKey(): [string, (k: string) => void] {
   const [key, setKey] = useState<string>(() => {
     if (typeof window === "undefined") return "";
-    return window.localStorage.getItem(ADMIN_KEY_STORAGE) ?? "";
+    return (
+      window.localStorage.getItem(ADMIN_KEY_STORAGE) ??
+      window.localStorage.getItem(LEGACY_KEY_STORAGE) ??
+      ""
+    );
   });
   useEffect(() => {
     if (!key) window.localStorage.removeItem(ADMIN_KEY_STORAGE);
@@ -61,20 +69,13 @@ function useAdminKey(): [string, (k: string) => void] {
 export default function AdminPlayers() {
   const [adminKey, setAdminKey] = useAdminKey();
   const [newNames, setNewNames] = useState<Record<number, string>>({});
+  // Games ticked in each group's add form (unset = all of the group's games).
+  const [newGames, setNewGames] = useState<Record<number, string[]>>({});
+  const [added, setAdded] = useState<AddedPlayer | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ ok: boolean; message: string } | null>(null);
-  // New-group form.
-  const [newGroup, setNewGroup] = useState<{
-    name: string;
-    slug: string;
-    games: string[];
-    buyIn: string;
-    lmsAllOutRule: string;
-  }>({ name: "", slug: "", games: ["lms"], buyIn: "10", lmsAllOutRule: "rollover" });
-  // Per-group unsaved rule edits, keyed by group id.
-  const [ruleDrafts, setRuleDrafts] = useState<
-    Record<number, { buyIn: string; lmsAllOutRule: string }>
-  >({});
+  // Player or group whose permanent-delete confirm dialog is open.
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const queryClient = useQueryClient();
 
   const {
@@ -102,27 +103,70 @@ export default function AdminPlayers() {
     await refetch();
   }
 
-  async function addPlayer(groupId: number) {
-    const username = (newNames[groupId] ?? "").trim();
+  function chosenGames(group: GroupWithPlayers): string[] {
+    return newGames[group.id] ?? group.enabledGames;
+  }
+
+  async function addPlayer(group: GroupWithPlayers) {
+    const username = (newNames[group.id] ?? "").trim();
     if (!username) return;
     setBusy(true);
     setStatus(null);
+    setAdded(null);
     try {
       const res = await fetch("/api/admin/players", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": adminKey },
-        body: JSON.stringify({ groupId, username }),
+        body: JSON.stringify({ groupId: group.id, username, enabledGames: chosenGames(group) }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
-      setNewNames((prev) => ({ ...prev, [groupId]: "" }));
-      setStatus({ ok: true, message: data?.message || `Added "${username}".` });
+      setNewNames((prev) => ({ ...prev, [group.id]: "" }));
+      setNewGames((prev) => {
+        const next = { ...prev };
+        delete next[group.id];
+        return next;
+      });
+      setAdded({
+        groupId: group.id,
+        username: data?.player?.username ?? username,
+        loginCode: data?.player?.loginCode ?? null,
+        message: data?.message || `Added "${username}".`,
+      });
       await refresh();
     } catch (err: any) {
       setStatus({ ok: false, message: err?.message || "Add failed" });
     } finally {
       setBusy(false);
     }
+  }
+
+  // Put a player who isn't in LMS back in: the current competition if it
+  // hasn't started, otherwise the next one.
+  async function joinLms(player: Player) {
+    setBusy(true);
+    setStatus(null);
+    try {
+      const res = await fetch(`/api/admin/players/${player.id}/lms`, {
+        method: "POST",
+        headers: { "x-api-key": adminKey },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+      setStatus({ ok: true, message: data?.message || "Done." });
+      await refresh();
+    } catch (err: any) {
+      setStatus({ ok: false, message: err?.message || "Couldn't add them to LMS" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function copy(text: string, what: string) {
+    navigator.clipboard
+      ?.writeText(text)
+      .then(() => setStatus({ ok: true, message: `Copied ${what}.` }))
+      .catch(() => {});
   }
 
   async function removePlayer(player: Player, group: GroupWithPlayers) {
@@ -153,75 +197,38 @@ export default function AdminPlayers() {
     }
   }
 
-  async function createGroup() {
-    const name = newGroup.name.trim();
-    const slug = newGroup.slug.trim().toLowerCase();
-    if (!name || !slug) {
-      setStatus({ ok: false, message: "Group needs a name and a slug." });
-      return;
-    }
-    setBusy(true);
-    setStatus(null);
-    try {
-      const res = await fetch("/api/admin/groups", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": adminKey },
-        body: JSON.stringify({
-          name,
-          slug,
-          enabledGames: newGroup.games,
-          buyIn: Number(newGroup.buyIn) || 0,
-          lmsAllOutRule: newGroup.lmsAllOutRule,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
-      setStatus({ ok: true, message: `Created group "${name}". Add players below.` });
-      setNewGroup({ name: "", slug: "", games: ["lms"], buyIn: "10", lmsAllOutRule: "rollover" });
-      await refresh();
-    } catch (err: any) {
-      setStatus({ ok: false, message: err?.message || "Create failed" });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveGroupRules(group: GroupWithPlayers) {
-    const draft = ruleDrafts[group.id] ?? {
-      buyIn: String(group.buyIn),
-      lmsAllOutRule: group.lmsAllOutRule,
-    };
-    setBusy(true);
-    setStatus(null);
-    try {
-      const res = await fetch(`/api/admin/groups/${group.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "x-api-key": adminKey },
-        body: JSON.stringify({
-          buyIn: Number(draft.buyIn) || 0,
-          lmsAllOutRule: draft.lmsAllOutRule,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
-      setStatus({ ok: true, message: `Saved ${group.name}'s rules.` });
-      setRuleDrafts((prev) => {
-        const next = { ...prev };
-        delete next[group.id];
-        return next;
-      });
-      await refresh();
-    } catch (err: any) {
-      setStatus({ ok: false, message: err?.message || "Save failed" });
-    } finally {
-      setBusy(false);
-    }
-  }
-
   // The games a player can currently see: their override, or (when null) all of
   // the group's games.
   function effectivePlayerGames(player: Player, group: GroupWithPlayers): string[] {
     return player.enabledGames ?? group.enabledGames;
+  }
+
+  // Why a game's tab is hidden for this player regardless of the toggle, or
+  // null if the toggle alone decides. Mirrors Header (NAV_HIDDEN_GAMES).
+  function autoHiddenReason(gameKey: string, player: Player, group: GroupWithPlayers): string | null {
+    if (NAV_HIDDEN_GAMES.includes(gameKey)) {
+      return "hidden from the menu for everyone while it's off-season";
+    }
+    return null;
+  }
+
+  // The WhatsApp welcome message for a player: how to log in with their code,
+  // and how each game they can see works under this group's rules.
+  function playerWelcome(player: Player, group: GroupWithPlayers): string | null {
+    if (!player.loginCode) return null;
+    return welcomeMessage({
+      username: player.username,
+      groupName: group.name,
+      loginCode: player.loginCode,
+      siteUrl: SITE_URL,
+      games: effectivePlayerGames(player, group).filter((g) => !autoHiddenReason(g, player, group)),
+      rules: group.rules,
+      lms: player.inLms
+        ? { status: "in", competitionName: group.lms?.name, startGameweek: group.lms?.startGameweek }
+        : player.lmsNext
+          ? { status: "next", competitionName: group.lms?.name }
+          : { status: "none" },
+    });
   }
 
   // Toggle one game on/off for a player and persist the new set. Updates the
@@ -282,7 +289,7 @@ export default function AdminPlayers() {
         );
       }
       const games = (data?.effectiveGames as string[] | undefined)?.join(", ") || "none";
-      setStatus({ ok: true, message: `${player.username} now sees: ${games}.` });
+      setStatus({ ok: true, message: data?.message || `${player.username} now sees: ${games}.` });
       await refresh();
     } catch (err: any) {
       setStatus({ ok: false, message: err?.message || "Update failed" });
@@ -294,34 +301,41 @@ export default function AdminPlayers() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-background">
-      <Header />
-      <main className="container mx-auto px-4 py-6 flex-grow space-y-6">
-        <AdminNav />
+    <AdminLayout className="space-y-6">
         <div>
-          <h1 className="text-2xl font-bold text-primary">Manage Players</h1>
-          <p className="text-sm text-gray-600">
+          <AdminPageTitle title="Manage Players">
+          <p>
             Add or remove players for each group.
-            <strong> Add</strong> creates the player's login if they're new and,
-            for a group that runs Last Man Standing, enrols them in the current
-            LMS competition. For a predictions-only group (Lawro) it just adds the
-            player and their code — that's all they need to sign in and play.
-            <strong> Remove</strong> takes them out of the current LMS competition
-            only — their past LMS competitions and predictions records are
-            kept, and their account is not deleted.
+            <strong> Add</strong> creates the player and their login code, with
+            only the games you tick. If Last Man Standing is ticked, they go
+            into the current competition only while it hasn't started yet. Once
+            its first deadline has passed its players are fixed, so they join
+            the next competition instead (the badge says <em>Next LMS</em>).
+            <strong> Remove</strong> takes them out of the current LMS
+            competition only. Their past LMS competitions and
+            predictions records are kept, and their account is not deleted.
+            The <strong>bin</strong> next to a player, and <strong>Delete group…</strong>{" "}
+            under each group, delete them from the database for good, after a
+            confirmation that lists everything that goes with them.
           </p>
-          <p className="text-sm text-gray-600 mt-2">
+          <p>
             Each player has a <strong>personal login code</strong> shown next to
-            their name — share it with them privately. Entering it on the
+            their name — share it with them privately. The speech-bubble button
+            next to it copies a WhatsApp welcome message with their code, how to
+            log in and how each of their football games works under this group's rules. Entering it on the
             landing page signs them into their group and enabled games (valid
             for a year), and lets them edit only their own picks.
           </p>
-          <p className="text-sm text-gray-600 mt-2">
+          <p>
             For groups that run more than one game, the <strong>Sees</strong>{" "}
             toggles under each player control which game tabs that person sees.
             All on by default — e.g. turn off Lawro for a player who only
-            plays Last Man Standing.
+            plays Last Man Standing. Turning LMS off also takes them out of a
+            competition that hasn't started (one that's under way keeps them,
+            and the badge turns amber); turning it on adds them like a new
+            player.
           </p>
+          </AdminPageTitle>
         </div>
 
         <Card>
@@ -354,116 +368,6 @@ export default function AdminPlayers() {
           </div>
         )}
 
-        {adminKey && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Create a group</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <p className="text-sm text-gray-600">
-                A group is its own circle of friends with its own players, games,
-                leaderboard and rules. Give it a name and a short slug, pick its
-                games, and set the rules. Add players to it below once it exists.
-              </p>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1">
-                  <Label htmlFor="ng-name" className="text-xs text-gray-600">Name</Label>
-                  <Input
-                    id="ng-name"
-                    value={newGroup.name}
-                    onChange={(e) => setNewGroup((g) => ({ ...g, name: e.target.value }))}
-                    placeholder="e.g. Sunday League"
-                    disabled={busy}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="ng-slug" className="text-xs text-gray-600">
-                    Slug (lowercase, no spaces)
-                  </Label>
-                  <Input
-                    id="ng-slug"
-                    value={newGroup.slug}
-                    onChange={(e) => setNewGroup((g) => ({ ...g, slug: e.target.value }))}
-                    placeholder="e.g. sunday-league"
-                    className="font-mono text-sm"
-                    disabled={busy}
-                  />
-                </div>
-              </div>
-              <div className="space-y-1">
-                <span className="text-xs text-gray-600">Games</span>
-                <div className="flex flex-wrap gap-2">
-                  {ALL_GAMES.map((gameKey) => {
-                    const on = newGroup.games.includes(gameKey);
-                    return (
-                      <button
-                        key={gameKey}
-                        type="button"
-                        disabled={busy}
-                        aria-pressed={on}
-                        onClick={() =>
-                          setNewGroup((g) => ({
-                            ...g,
-                            games: on
-                              ? g.games.filter((x) => x !== gameKey)
-                              : [...g.games, gameKey],
-                          }))
-                        }
-                        className={`text-xs font-medium px-2.5 py-1 rounded-full border transition-colors ${
-                          on
-                            ? "bg-green-600 text-white border-green-600"
-                            : "bg-white text-gray-500 border-gray-300"
-                        }`}
-                      >
-                        {GAME_LABELS[gameKey] ?? gameKey}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1">
-                  <Label htmlFor="ng-buyin" className="text-xs text-gray-600">
-                    Buy-in per player
-                  </Label>
-                  <Input
-                    id="ng-buyin"
-                    type="number"
-                    min={0}
-                    value={newGroup.buyIn}
-                    onChange={(e) => setNewGroup((g) => ({ ...g, buyIn: e.target.value }))}
-                    disabled={busy}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="ng-rule" className="text-xs text-gray-600">
-                    Last Man Standing: when everyone's out
-                  </Label>
-                  <select
-                    id="ng-rule"
-                    value={newGroup.lmsAllOutRule}
-                    onChange={(e) =>
-                      setNewGroup((g) => ({ ...g, lmsAllOutRule: e.target.value }))
-                    }
-                    disabled={busy}
-                    className="w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-sm"
-                  >
-                    {ALL_OUT_RULES.map((r) => (
-                      <option key={r.value} value={r.value}>{r.label}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <Button
-                onClick={createGroup}
-                disabled={busy || !newGroup.name.trim() || !newGroup.slug.trim()}
-              >
-                Create group
-              </Button>
-            </CardContent>
-          </Card>
-        )}
-
         {!adminKey ? (
           <p className="text-sm text-gray-500">Enter your admin key to load groups.</p>
         ) : isLoading ? (
@@ -474,73 +378,19 @@ export default function AdminPlayers() {
           </p>
         ) : (
           groups.map((group) => (
-            <Card key={group.id} data-testid={`group-card-${group.slug}`}>
+            <Card key={group.id}>
               <CardHeader>
                 <CardTitle className="flex items-baseline justify-between gap-2">
                   <span>{group.name}</span>
                   <span className="text-xs font-normal text-gray-500">
-                    {group.slug} · {group.enabledGames.join(", ") || "no games"}
+                    {group.enabledGames.join(", ") || "no games"}
                   </span>
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                {(() => {
-                  const draft = ruleDrafts[group.id] ?? {
-                    buyIn: String(group.buyIn),
-                    lmsAllOutRule: group.lmsAllOutRule,
-                  };
-                  const dirty =
-                    draft.buyIn !== String(group.buyIn) ||
-                    draft.lmsAllOutRule !== group.lmsAllOutRule;
-                  const setDraft = (patch: Partial<typeof draft>) =>
-                    setRuleDrafts((prev) => ({ ...prev, [group.id]: { ...draft, ...patch } }));
-                  return (
-                    <div className="rounded-md bg-gray-50 p-3 space-y-2">
-                      <span className="text-[10px] uppercase tracking-wide text-gray-400">
-                        Rules
-                      </span>
-                      <div className="flex flex-wrap items-end gap-3">
-                        <div className="space-y-1">
-                          <Label className="text-xs text-gray-600">Buy-in</Label>
-                          <Input
-                            type="number"
-                            min={0}
-                            value={draft.buyIn}
-                            onChange={(e) => setDraft({ buyIn: e.target.value })}
-                            className="w-24 text-sm"
-                            disabled={busy}
-                          />
-                        </div>
-                        <div className="space-y-1 min-w-[16rem] flex-1">
-                          <Label className="text-xs text-gray-600">
-                            LMS: when everyone's out
-                          </Label>
-                          <select
-                            value={draft.lmsAllOutRule}
-                            onChange={(e) => setDraft({ lmsAllOutRule: e.target.value })}
-                            disabled={busy}
-                            className="w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-sm"
-                          >
-                            {ALL_OUT_RULES.map((r) => (
-                              <option key={r.value} value={r.value}>{r.label}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={busy || !dirty}
-                          onClick={() => saveGroupRules(group)}
-                        >
-                          Save rules
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })()}
-                {group.enabledGames.includes("lms") && !group.hasActiveLms && (
+                {group.enabledGames.includes("lms") && !group.lms && (
                   <p className="text-xs text-amber-700 bg-amber-50 rounded px-2 py-1">
-                    No active LMS competition — start one to enrol players.
+                    No LMS competition running right now. Players with LMS join the next one when it opens.
                   </p>
                 )}
                 {group.players.length === 0 ? (
@@ -572,18 +422,30 @@ export default function AdminPlayers() {
                               {player.loginCode}
                             </button>
                           )}
-                          {group.enabledGames.includes("lms") && group.hasActiveLms && (
-                            <span
-                              className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full whitespace-nowrap ${
-                                player.inLms
-                                  ? "bg-green-100 text-green-700"
-                                  : "bg-gray-100 text-gray-500"
-                              }`}
+                          {player.loginCode && (
+                            <button
+                              type="button"
+                              title={`Copy a WhatsApp welcome message for ${player.username} (login code + how their games work)`}
+                              aria-label={`Copy welcome message for ${player.username}`}
+                              data-testid={`copy-welcome-${player.id}`}
+                              onClick={() => {
+                                const text = playerWelcome(player, group);
+                                if (text) copy(text, `a WhatsApp welcome message for ${player.username}`);
+                              }}
+                              className="p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100"
                             >
-                              {player.inLms ? "In LMS" : "Not in LMS"}
-                            </span>
+                              <MessageCircle className="h-3.5 w-3.5" />
+                            </button>
                           )}
+                          <LmsBadge
+                            player={player}
+                            group={group}
+                            seesLms={effectivePlayerGames(player, group).includes("lms")}
+                            busy={busy}
+                            onJoin={() => joinLms(player)}
+                          />
                         </div>
+                        <div className="flex items-center shrink-0">
                         <Button
                           variant="ghost"
                           size="sm"
@@ -593,6 +455,26 @@ export default function AdminPlayers() {
                         >
                           Remove
                         </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          title={`Delete ${player.username} permanently`}
+                          aria-label={`Delete ${player.username} permanently`}
+                          data-testid={`delete-player-${player.id}`}
+                          className="px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                          onClick={() =>
+                            setDeleteTarget({
+                              kind: "player",
+                              id: player.id,
+                              username: player.username,
+                              groupName: group.name,
+                            })
+                          }
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                        </div>
                        </div>
                        {group.enabledGames.length > 1 && (
                          <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
@@ -602,9 +484,24 @@ export default function AdminPlayers() {
                            {group.enabledGames.map((gameKey) => {
                              const on = effectivePlayerGames(player, group).includes(gameKey);
                              const label = GAME_LABELS[gameKey] ?? gameKey;
+                             const hiddenReason = autoHiddenReason(gameKey, player, group);
+                             if (hiddenReason) {
+                               return (
+                                 <span
+                                   key={gameKey}
+                                   data-testid={`game-badge-${player.id}-${gameKey}`}
+                                   title={`${label}: ${hiddenReason}`}
+                                   className="inline-flex items-center gap-1 text-[10px] font-medium pl-1 pr-2 py-0.5 rounded-full border border-dashed border-gray-300 bg-gray-50 text-gray-400"
+                                 >
+                                   <EyeOff className="h-3 w-3 shrink-0" />
+                                   {label}
+                                 </span>
+                               );
+                             }
                              return (
                                <button
                                  key={gameKey}
+                                 data-testid={`game-badge-${player.id}-${gameKey}`}
                                  type="button"
                                  disabled={busy}
                                  onClick={() => togglePlayerGame(player, group, gameKey)}
@@ -613,7 +510,7 @@ export default function AdminPlayers() {
                                  className={`inline-flex items-center gap-1 text-[10px] font-medium pl-1 pr-2 py-0.5 rounded-full border transition-colors disabled:opacity-60 ${
                                    on
                                      ? "bg-green-600 text-white border-green-600 hover:bg-green-700"
-                                     : "bg-white text-gray-400 border-gray-300 line-through hover:border-gray-400"
+                                     : "bg-card text-gray-400 border-gray-300 line-through hover:border-gray-400"
                                  }`}
                                >
                                  {on ? (
@@ -632,32 +529,244 @@ export default function AdminPlayers() {
                   </ul>
                 )}
 
-                <div className="flex gap-2 pt-1">
-                  <Input
-                    value={newNames[group.id] ?? ""}
-                    onChange={(e) =>
-                      setNewNames((prev) => ({ ...prev, [group.id]: e.target.value }))
-                    }
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") addPlayer(group.id);
-                    }}
-                    placeholder="New player name…"
-                    className="text-sm"
-                    disabled={busy}
-                  />
-                  <Button
-                    onClick={() => addPlayer(group.id)}
-                    disabled={busy || !(newNames[group.id] ?? "").trim()}
+                <AddPlayerForm
+                  group={group}
+                  name={newNames[group.id] ?? ""}
+                  games={chosenGames(group)}
+                  busy={busy}
+                  onName={(v) => setNewNames((prev) => ({ ...prev, [group.id]: v }))}
+                  onToggleGame={(game) => {
+                    const current = chosenGames(group);
+                    const next = current.includes(game)
+                      ? current.filter((g) => g !== game)
+                      : group.enabledGames.filter((g) => g === game || current.includes(g));
+                    setNewGames((prev) => ({ ...prev, [group.id]: next }));
+                  }}
+                  onAdd={() => addPlayer(group)}
+                />
+
+                {added?.groupId === group.id && (
+                  <div
+                    data-testid="added-player"
+                    className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-900 space-y-2"
                   >
-                    Add
+                    <div className="flex items-start justify-between gap-2">
+                      <p>{added.message}</p>
+                      <button
+                        type="button"
+                        aria-label="Dismiss"
+                        className="text-green-700 hover:text-green-900"
+                        onClick={() => setAdded(null)}
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                    {added.loginCode && (
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="bg-card"
+                          onClick={() => copy(added.loginCode as string, `${added.username}'s code`)}
+                        >
+                          <Copy className="h-3.5 w-3.5 mr-1.5" />
+                          Copy code <span className="ml-1 font-mono">{added.loginCode}</span>
+                        </Button>
+                        {(() => {
+                          const row = group.players.find((p) => p.username === added.username);
+                          const text = row ? playerWelcome(row, group) : null;
+                          return (
+                            text && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="bg-card"
+                                data-testid="copy-welcome"
+                                onClick={() => copy(text, "the WhatsApp welcome message")}
+                              >
+                                <Copy className="h-3.5 w-3.5 mr-1.5" />
+                                Copy WhatsApp message
+                              </Button>
+                            )
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex justify-end pt-2 border-t">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    data-testid={`delete-group-${group.id}`}
+                    className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                    onClick={() => setDeleteTarget({ kind: "group", id: group.id, name: group.name })}
+                  >
+                    <Trash2 className="h-4 w-4 mr-1" />
+                    Delete group…
                   </Button>
                 </div>
               </CardContent>
             </Card>
           ))
         )}
-      </main>
-      <Footer minimal />
+      <AdminDeleteDialog
+        target={deleteTarget}
+        adminKey={adminKey}
+        onClose={() => setDeleteTarget(null)}
+        onDeleted={async (message) => {
+          setDeleteTarget(null);
+          setStatus({ ok: true, message });
+          await refresh();
+        }}
+      />
+    </AdminLayout>
+  );
+}
+
+// The player's Last Man Standing state in the group's roster row.
+function LmsBadge({
+  player,
+  group,
+  seesLms,
+  busy,
+  onJoin,
+}: {
+  player: Player;
+  group: GroupWithPlayers;
+  seesLms: boolean;
+  busy: boolean;
+  onJoin: () => void;
+}) {
+  if (!group.enabledGames.includes("lms")) return null;
+  const base = "text-[10px] font-medium px-1.5 py-0.5 rounded-full whitespace-nowrap";
+  const comp = group.lms?.name ?? "the current competition";
+  if (player.inLms && !seesLms) {
+    return (
+      <span
+        data-testid={`lms-badge-${player.id}`}
+        title={`In ${comp}, but LMS is hidden for them. The missed-pick rule still applies; use Remove to take them out.`}
+        className={`${base} bg-amber-100 text-amber-800`}
+      >
+        In LMS · hidden
+      </span>
+    );
+  }
+  if (player.inLms) {
+    return (
+      <span data-testid={`lms-badge-${player.id}`} className={`${base} bg-green-100 text-green-700`}>
+        In LMS
+      </span>
+    );
+  }
+  if (player.lmsNext) {
+    return (
+      <span
+        data-testid={`lms-badge-${player.id}`}
+        title={`Joined after ${comp} started, so they're in the next competition.`}
+        className={`${base} bg-sky-100 text-sky-800`}
+      >
+        Next LMS
+      </span>
+    );
+  }
+  if (!seesLms || !group.lms) return null;
+  return (
+    <button
+      type="button"
+      data-testid={`lms-badge-${player.id}`}
+      disabled={busy}
+      onClick={onJoin}
+      title={
+        group.lms.open
+          ? `Add ${player.username} to ${comp} (it hasn't started yet)`
+          : `${comp} is under way. Add ${player.username} to the next competition`
+      }
+      className={`${base} bg-gray-100 text-gray-500 hover:bg-gray-200 disabled:opacity-60`}
+    >
+      Not in LMS · add
+    </button>
+  );
+}
+
+// Name, games and an LMS hint for adding someone to a group.
+function AddPlayerForm({
+  group,
+  name,
+  games,
+  busy,
+  onName,
+  onToggleGame,
+  onAdd,
+}: {
+  group: GroupWithPlayers;
+  name: string;
+  games: string[];
+  busy: boolean;
+  onName: (v: string) => void;
+  onToggleGame: (game: string) => void;
+  onAdd: () => void;
+}) {
+  const trimmed = name.trim();
+  const taken = group.players.find((p) => p.username.toLowerCase() === trimmed.toLowerCase());
+  const lmsTicked = group.enabledGames.includes("lms") && games.includes("lms");
+  let lmsHint: string | null = null;
+  if (lmsTicked) {
+    if (!group.lms) lmsHint = "No LMS competition is running, so they'll join the next one when it opens.";
+    else if (group.lms.open) lmsHint = `They'll go into ${group.lms.name}, which starts in GW${group.lms.startGameweek}.`;
+    else
+      lmsHint = `${group.lms.name} is under way (started GW${group.lms.startGameweek}), so they'll join the next LMS competition, not this one.`;
+  }
+  const canAdd = !!trimmed && !taken && games.length > 0 && !busy;
+  return (
+    <div className="space-y-2 rounded-md border border-dashed border-gray-300 p-3" data-testid={`add-player-${group.id}`}>
+      <div className="flex gap-2">
+        <Input
+          value={name}
+          onChange={(e) => onName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && canAdd) onAdd();
+          }}
+          placeholder="New player name…"
+          aria-label={`New player name for ${group.name}`}
+          className="text-sm"
+          disabled={busy}
+        />
+        <Button onClick={onAdd} disabled={!canAdd}>
+          Add
+        </Button>
+      </div>
+      {taken && <p className="text-xs text-red-700">{taken.username} is already in {group.name}.</p>}
+      {group.enabledGames.length > 1 && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] uppercase tracking-wide text-gray-400">Plays</span>
+          {group.enabledGames.map((gameKey) => {
+            const on = games.includes(gameKey);
+            const label = GAME_LABELS[gameKey] ?? gameKey;
+            return (
+              <button
+                key={gameKey}
+                type="button"
+                disabled={busy}
+                aria-pressed={on}
+                onClick={() => onToggleGame(gameKey)}
+                className={`inline-flex items-center gap-1 text-[11px] font-medium pl-1 pr-2 py-0.5 rounded-full border transition-colors disabled:opacity-60 ${
+                  on
+                    ? "bg-green-600 text-white border-green-600 hover:bg-green-700"
+                    : "bg-card text-gray-400 border-gray-300 line-through hover:border-gray-400"
+                }`}
+              >
+                {on ? <Check className="h-3 w-3 shrink-0" /> : <X className="h-3 w-3 shrink-0" />}
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {games.length === 0 && <p className="text-xs text-red-700">Pick at least one game.</p>}
+      {lmsHint && <p className="text-xs text-gray-600">{lmsHint}</p>}
     </div>
   );
 }

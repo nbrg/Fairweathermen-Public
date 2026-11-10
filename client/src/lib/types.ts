@@ -36,6 +36,8 @@ export type Prediction = {
   // confirms a pick exists but withholds the scoreline (homeScore/awayScore
   // absent) until the gameweek deadline passes.
   hidden?: boolean;
+  // Made after the deadline under the "predict until kick-off" rule.
+  isLatePick?: boolean;
   // The player's Joker for the gameweek (points doubled). Only true when the
   // Joker rule applied to that gameweek; withheld with the scoreline while hidden.
   isJoker?: boolean;

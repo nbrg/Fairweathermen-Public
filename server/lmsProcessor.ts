@@ -1,5 +1,5 @@
 import { storage } from './storage';
-import { getGroupRules } from './groupRules';
+import { getGroupRules, stakeForNewCompetition } from './groupRules';
 import type { LmsSelection, LmsParticipant, LmsCompetition, LmsAllOutPolicy } from '@shared/schema';
 
 // The last gameweek of a Premier League season — a new competition never starts
@@ -88,69 +88,18 @@ export class LmsProcessor {
       // group's "all out together" rule.
       console.log(`All participants eliminated in GW${currentGameweek} - applying "${rules.lms.allOutPolicy}" rule`);
       await this.handleAllOut(currentCompetition, currentGameweek, rules.lms.allOutPolicy);
-    } else if (stillActive.length === 1) {
+    } else if (stillActive.length === 1 && remainingParticipants.length > 1) {
       // Single winner - complete this competition and roll into the next one.
+      // (A competition that only ever had one player — e.g. a brand-new group
+      // whose friends haven't joined yet — has no one to beat, so it just
+      // carries on below rather than crowning its only entrant.)
       console.log('Single winner found - completing competition');
       await this.completeCompetition(currentCompetition, stillActive[0]);
       await this.startNextCompetition(currentCompetition);
-    } else if (winners.length > 1) {
-      // Multiple winners - advance to next gameweek
-      console.log('Multiple winners - advancing to next gameweek');
+    } else {
+      // More than one still standing - advance to the next gameweek.
+      console.log(`${stillActive.length} still standing - advancing to next gameweek`);
       await this.advanceToNextGameweek(currentCompetition);
-    }
-  }
-
-  /**
-   * Resolve a gameweek where every remaining player went out together, per the
-   * group's rule:
-   *  - "revive": everyone is given another life and play continues in the same
-   *    competition (the public repo's long-standing alternative).
-   *  - "rollover": no winner; a fresh competition opens for the same roster
-   *    (the default — the pot carries over).
-   *  - "co_winners": the players who went out this gameweek share the win
-   *    (recorded in winnerId / coWinnerId); the competition simply ends.
-   *  - "no_winner": no winner recorded and no new competition.
-   */
-  private async handleAllOut(
-    competition: LmsCompetition,
-    gameweek: number,
-    policy: LmsAllOutPolicy,
-  ): Promise<void> {
-    if (policy === 'revive') {
-      // Give everyone another life and carry on in the same competition.
-      console.log('All participants eliminated - reviving the roster (revive rule)');
-      const participants = await storage.getLmsParticipantsByCompetition(competition.id);
-      for (const p of participants) {
-        await storage.updateLmsParticipant(p.id, { isActive: 'true', eliminatedInRound: null });
-      }
-      await this.advanceToNextGameweek(competition);
-      return;
-    }
-
-    if (policy === 'co_winners') {
-      // The co-winners are the players knocked out in this final gameweek.
-      const participants = await storage.getLmsParticipantsByCompetition(competition.id);
-      const finalists = participants.filter(p => p.eliminatedInRound === gameweek);
-      const winnerId = finalists[0]?.userId ?? null;
-      const coWinnerId = finalists[1]?.userId ?? null;
-      await storage.updateLmsCompetition(competition.id, {
-        status: 'completed',
-        winnerId,
-        coWinnerId,
-      });
-      if (finalists.length > 2) {
-        console.warn(
-          `[LMS] ${finalists.length} co-winners in competition ${competition.id}; only two winner slots exist, recorded the first two.`,
-        );
-      }
-      return;
-    }
-
-    // "rollover" and "no_winner" both complete with no winner; only rollover
-    // opens a fresh competition for the same roster.
-    await storage.updateLmsCompetition(competition.id, { status: 'completed' });
-    if (policy === 'rollover') {
-      await this.startNextCompetition(competition);
     }
   }
 
@@ -186,6 +135,45 @@ export class LmsProcessor {
         console.log(`Participant ${participant.id} lost GW${gameweek} but survives (${lossesUsed}/${lives} lives used)`);
       }
     }
+  }
+
+  /**
+   * Resolve a gameweek where every remaining player went out together, per the
+   * group's rule:
+   *  - "rollover": no winner; a fresh competition opens for the same roster
+   *    (the long-standing default — the pot carries over).
+   *  - "co_winners": the players who went out this gameweek share the win
+   *    (recorded in winnerId / coWinnerId).
+   *  Either way a new competition follows.
+   */
+  private async handleAllOut(
+    competition: LmsCompetition,
+    gameweek: number,
+    policy: LmsAllOutPolicy,
+  ): Promise<void> {
+    if (policy === 'co_winners') {
+      // The co-winners are the players knocked out in this final gameweek. Two of
+      // them go in winnerId / coWinnerId to mark the shared win; the client reads
+      // the full list back from participants (competitionWinnerUserIds), so
+      // 10 going out together means 10 winners.
+      const participants = await storage.getLmsParticipantsByCompetition(competition.id);
+      const finalists = participants.filter(p => p.eliminatedInRound === gameweek);
+      const winnerId = finalists[0]?.userId ?? null;
+      const coWinnerId = finalists[1]?.userId ?? null;
+      await storage.updateLmsCompetition(competition.id, {
+        status: 'completed',
+        winnerId,
+        coWinnerId,
+      });
+      // A new competition always follows the one that just ended.
+      await this.startNextCompetition(competition);
+      return;
+    }
+
+    // "rollover": complete with no winner and open a new competition for the
+    // same roster; the pot carries into it.
+    await storage.updateLmsCompetition(competition.id, { status: 'completed' });
+    await this.startNextCompetition(competition);
   }
 
   /**
@@ -240,7 +228,9 @@ export class LmsProcessor {
     const nextStartGameweek = prevGw + 1;
 
     if (nextStartGameweek > FINAL_GAMEWEEK) {
-      console.log(`Season over (next GW ${nextStartGameweek} > ${FINAL_GAMEWEEK}) - not starting a new competition`);
+      // Nothing left to pick this season. lmsAutoStart's sweep opens the group's
+      // next competition at GW1 as soon as next season's fixtures are imported.
+      console.log(`Season over (next GW ${nextStartGameweek} > ${FINAL_GAMEWEEK}) - next competition opens with next season's GW1`);
       return;
     }
 
@@ -254,9 +244,10 @@ export class LmsProcessor {
       return;
     }
 
-    // Carry the roster over from the competition that just finished (deduped).
-    const priorParticipants = await storage.getLmsParticipantsByCompetition(previous.id);
-    const roster = Array.from(new Set(priorParticipants.map((p) => p.userId)));
+    // Carry the roster over from the competition that just finished (deduped),
+    // plus anyone who joined the group too late for it (see lmsEnrolment.ts).
+    const { nextLmsRoster, stopWaiting } = await import('./lmsEnrolment');
+    const roster = await nextLmsRoster(groupId, previous);
     if (roster.length === 0) {
       console.log(`Previous competition ${previous.id} had no participants - skipping auto-start`);
       return;
@@ -280,6 +271,7 @@ export class LmsProcessor {
       currentGameweek: nextStartGameweek,
       status: 'active',
       prizeAmount: rules.lms.buyIn,
+      stakeGbp: await stakeForNewCompetition(groupId),
     });
 
     for (const userId of roster) {
@@ -290,6 +282,8 @@ export class LmsProcessor {
         eliminatedInRound: null,
       });
     }
+
+    await stopWaiting(roster);
 
     console.log(
       `Started new competition ${newCompetition.id} "${name}" for group ${groupId} ` +

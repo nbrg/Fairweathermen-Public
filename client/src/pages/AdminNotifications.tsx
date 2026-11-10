@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { GroupMultiSelect } from "@/components/GroupMultiSelect";
 import { AdminGate } from "@/components/AdminGate";
-import { AdminNav } from "@/components/AdminNav";
+import { AdminLayout } from "@/components/AdminNav";
 
 type Device = { userAgent: string | null; leads: number[]; createdAt: string };
 type Row = {
@@ -169,9 +169,7 @@ export default function AdminNotifications() {
   ];
 
   return (
-    <div className="min-h-screen bg-background">
-      <main className="container mx-auto max-w-4xl px-4 py-6">
-        <AdminNav />
+    <AdminLayout>
         <h1 className="text-2xl font-bold text-primary">Reminders &amp; PWA</h1>
         <p className="mt-1 text-sm text-gray-600">
           Who has turned on kickoff reminders, who's installed the app, and who
@@ -194,7 +192,7 @@ export default function AdminNotifications() {
                 type="button"
                 onClick={() => setStatFilter(active ? null : key)}
                 className={`rounded-lg border p-3 text-center transition-colors ${
-                  active ? "border-primary bg-primary/5 ring-1 ring-primary" : "bg-white hover:bg-gray-50"
+                  active ? "border-primary bg-primary/5 ring-1 ring-primary" : "bg-card hover:bg-gray-50"
                 }`}
               >
                 <div className="text-2xl font-bold text-primary">
@@ -246,19 +244,18 @@ export default function AdminNotifications() {
             );
           })}
           {sections.length === 0 && (
-            <div className="rounded-lg border bg-white p-6 text-sm text-gray-500">
+            <div className="rounded-lg border bg-card p-6 text-sm text-gray-500">
               No players match.
             </div>
           )}
         </div>
-      </main>
-    </div>
+    </AdminLayout>
   );
 }
 
 function PersonCard({ r, onTest, onReset }: { r: Row; onTest: () => void; onReset: () => void }) {
   return (
-    <div className="rounded-lg border bg-white p-3">
+    <div className="rounded-lg border bg-card p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="font-semibold text-gray-900">{r.name}</div>
         <div className="flex items-center gap-2 text-xs">

@@ -21,6 +21,7 @@ import { db } from "../server/db";
 import { groups } from "@shared/schema";
 import { storage } from "../server/storage";
 import type { Match, Team } from "@shared/schema";
+import { isCityGroup } from "@shared/originalGroups";
 
 type MatchWithTeams = Match & { homeTeam: Team; awayTeam: Team };
 
@@ -56,8 +57,7 @@ async function resolveGroup(): Promise<{ id: number; name: string; slug: string 
     (GROUP_ARG && all.find((x) => String(x.id) === GROUP_ARG)) ||
     (arg && all.find((x) => x.slug.toLowerCase() === arg)) ||
     (arg && all.find((x) => x.name.toLowerCase() === arg)) ||
-    all.find((x) => x.slug.toLowerCase() === "city") ||
-    all.find((x) => x.name.toLowerCase() === "fairweathermen") ||
+    all.find((x) => isCityGroup(x)) ||
     all.find((x) => (x.enabledGames as string[]).includes("predictions"));
   if (!g) {
     console.error(`[snapshot] Could not resolve a group. Available: ${all.map((x) => `${x.name} (${x.slug})`).join(", ")}`);

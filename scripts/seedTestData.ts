@@ -55,8 +55,7 @@ async function main() {
       slug: "demo",
       name: "Demo League",
       enabledGames: ["predictions", "lms"],
-      buyIn: 5,
-      lmsAllOutRule: "rollover",
+      rules: { lms: { buyIn: 5, allOutPolicy: "rollover" } } as any,
     })
     .returning();
 
@@ -137,21 +136,27 @@ async function main() {
 
   // A second group Alex also belongs to, under the same personal login code, so
   // the multi-group switcher and cross-group game tabs can be exercised. Rovers
-  // plays LMS only (no Lawro), while Demo League plays both, so switching
-  // between them changes the visible games and the primary landing game.
+  // plays LMS + Lawro.
   const [rovers] = await db
     .insert(groups)
     .values({
       slug: "rovers",
       name: "Rovers",
-      enabledGames: ["lms"],
-      buyIn: 10,
-      lmsAllOutRule: "revive",
+      enabledGames: ["lms", "predictions"],
+      rules: { lms: { buyIn: 10 } } as any,
     })
     .returning();
   await db.insert(users).values({
     username: "Alex", password: "x", groupId: rovers.id, loginCode: codes.alex,
   });
+
+  // A third group with no games and one player, for "someone outside the
+  // group can't do this" checks.
+  const [wanderers] = await db
+    .insert(groups)
+    .values({ slug: "wanderers", name: "Wanderers", enabledGames: [] })
+    .returning();
+  await db.insert(users).values({ username: "Dana", password: "x", groupId: wanderers.id, loginCode: "away-dana" });
 
   console.log("Seeded Demo League + Rovers. Login codes:");
   for (const [name, code] of Object.entries(codes)) {

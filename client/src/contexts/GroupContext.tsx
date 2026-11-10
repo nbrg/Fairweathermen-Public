@@ -33,21 +33,24 @@ export type Group = {
   slug: string;
   name: string;
   enabledGames: string[];
+  // The active group's rules (Lawro points, LMS twists), resolved onto the
+  // defaults server-side so these are always complete.
+  rules?: GroupRules;
+  // True when the logged-in person created this group (is its admin). Drives
+  // the owner-only "Group settings" entry.
+  isOwner?: boolean;
+  // True for a self-service group (created via /create, so it has an admin
+  // and admin-set rules); false for the original hand-seeded groups.
+  selfService?: boolean;
+  // Rule changes made by the admin since this player last acknowledged them;
+  // shown in a pop-up (RuleChangesDialog) until they do.
+  ruleChanges?: UnseenRuleChange[];
   // The logged-in user this session belongs to. Present now that login is
   // per-user rather than per-group.
   user?: SessionUser;
   // Every group this person can switch between (one entry per group they
   // belong to). Length > 1 means the header shows a group switcher.
   availableGroups?: GroupSummary[];
-  // This group's resolved rules (defaults merged, legacy columns bridged).
-  // Lets the client score / label using the group's own settings.
-  rules?: GroupRules;
-  // True when the logged-in person created this group (is its admin). Gates the
-  // owner-only group settings page + header link.
-  isOwner?: boolean;
-  // Rule changes made by the admin since this player last acknowledged them;
-  // shown in a pop-up (RuleChangesDialog) until they do.
-  ruleChanges?: UnseenRuleChange[];
 };
 
 type GroupContextValue = {

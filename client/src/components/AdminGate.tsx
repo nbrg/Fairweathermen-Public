@@ -1,3 +1,5 @@
+import { AdminLayout } from "@/components/AdminNav";
+
 // Simple admin-password gate for the activity/audit views. Mirrors the other
 // admin pages: the key is stored in localStorage ("adminApiKey") and sent as the
 // x-api-key header. This only hides the UI — the server independently enforces
@@ -20,8 +22,10 @@ export function AdminGate({
     onSubmit();
   };
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="w-full max-w-sm rounded-lg border bg-white p-6 shadow-sm">
+    // Same frame as the unlocked admin pages (site header + game tabs), minus
+    // the admin tabs, which would only lead to more password prompts.
+    <AdminLayout nav={false}>
+      <div className="mx-auto mt-6 w-full max-w-sm rounded-lg border bg-card p-6 shadow-sm">
         <h1 className="text-lg font-bold text-primary">{title}</h1>
         <p className="mt-1 text-sm text-gray-600">Enter the admin password to view this.</p>
         <input
@@ -42,6 +46,6 @@ export function AdminGate({
           View
         </button>
       </div>
-    </div>
+    </AdminLayout>
   );
 }

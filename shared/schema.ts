@@ -1,10 +1,11 @@
-import { pgTable, text, serial, integer, json, timestamp, date, boolean, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, json, timestamp, date, boolean, unique, real } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 // Group = one closed circle of friends with their own players, leaderboard,
-// history etc. Identified by a slug ("united", "lastman") that doubles as
-// the access code on the landing page.
+// history etc. The slug is an internal key, unique and never shown or edited;
+// code that names a specific original group goes through
+// shared/originalGroups.ts. Names are unique too (checked on /create).
 export const groups = pgTable("groups", {
   id: serial("id").primaryKey(),
   slug: text("slug").notNull().unique(),
@@ -13,74 +14,96 @@ export const groups = pgTable("groups", {
   // Allowed values: "lms", "predictions" (the Prediction League,
   // aka "Lawro" — predict the score of every PL match, one gameweek at a time).
   enabledGames: json("enabled_games").$type<string[]>().notNull().default([]),
-  // Per-group rules, configurable from the admin "Groups" screen.
-  // buyIn: the stake each player puts in per competition, in whole currency
-  // units (0 = just for bragging rights). Surfaced to the UI as the group's pot.
-  buyIn: integer("buy_in").notNull().default(10),
-  // lmsAllOutRule: what happens in Last Man Standing when every remaining
-  // player is knocked out in the same gameweek:
-  //   "rollover" — the competition ends with no winner and a fresh one starts
-  //                 for the same roster (the pot carries over). The default.
-  //   "revive"   — everyone is given another life and play continues in the
-  //                 same competition.
-  lmsAllOutRule: text("lms_all_out_rule").notNull().default("rollover"),
   // The user row (id) of the person who created this group via the public
   // "Create a group" flow. That person is the group's *admin*: only they may
-  // edit the group's rules. NULL for the original, hand-seeded groups, which
-  // have no self-service owner and fall back to the global ADMIN_API_KEY.
+  // edit the group's rules (see `rules` below). NULL for the original,
+  // hand-seeded groups (city, rovers, …) which have no self-service owner — those
+  // stay owner-less and fall back to the global ADMIN_API_KEY for management.
   ownerUserId: integer("owner_user_id"),
   // Secret token embedded in a group's invite link (/join/<token>). Anyone with
   // the link can join the group and is handed their personal login code. NULL
-  // for groups created before self-service; minted for every self-service
-  // group at creation. Unique so a token maps to exactly one group.
+  // for groups created before self-service (they had no invite link); minted
+  // for every self-service group at creation. Unique so a token maps to exactly
+  // one group.
   inviteToken: text("invite_token").unique(),
-  // Per-group rule overrides for LMS / Lawro, set by the group's admin from the
-  // owner-only /group-settings page. NULL means "use the built-in defaults"
-  // (see DEFAULT_GROUP_RULES) — so every existing group keeps today's exact
-  // behaviour until an admin changes something. Always read through
-  // server/groupRules.ts's getGroupRules() (which bridges in the legacy buyIn /
-  // lmsAllOutRule columns) rather than used raw.
+  // Per-group rule overrides for LMS / Lawro, set by the group's admin. NULL
+  // means "use the built-in defaults" (see DEFAULT_GROUP_RULES) — so every
+  // existing group keeps today's exact behaviour until an admin changes
+  // something. Always read through resolveGroupRules() so a partial/legacy blob
+  // is merged onto the defaults rather than used raw.
   rules: json("rules").$type<Partial<GroupRules>>(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
-// Valid values for groups.lmsAllOutRule — the legacy column that the admin
-// "Groups" screen still writes. It is bridged into GroupRules.lms.allOutPolicy
-// (see below), which is the richer superset the owner settings page edits.
-export const LMS_ALL_OUT_RULES = ["rollover", "revive"] as const;
-export type LmsAllOutRule = (typeof LMS_ALL_OUT_RULES)[number];
+// A log of every change a group's admin makes to its rules. Each row keeps the
+// rules before and after, plus a readable list of what changed, so (a) every
+// player gets a pop-up about changes they haven't seen (users.
+// last_seen_rule_change_id) and (b) Lawro rule changes are never retroactive:
+// a change applies from `lawroEffectiveSeason`/`lawroEffectiveGameweek` (the
+// first gameweek whose deadline hadn't passed when it was made), and earlier
+// gameweeks keep the rules in this row's `before` — see lawroRulesAt().
+export const groupRuleChanges = pgTable("group_rule_changes", {
+  id: serial("id").primaryKey(),
+  groupId: integer("group_id").notNull(),
+  changedByUserId: integer("changed_by_user_id"),
+  changedAt: timestamp("changed_at").notNull().defaultNow(),
+  before: json("before").$type<GroupRules>().notNull(),
+  after: json("after").$type<GroupRules>().notNull(),
+  changes: json("changes").$type<RuleChangeItem[]>().notNull(),
+  // Set only when the change touched Lawro rules.
+  lawroEffectiveSeason: text("lawro_effective_season"),
+  lawroEffectiveGameweek: integer("lawro_effective_gameweek"),
+});
+
+export type GroupRuleChange = typeof groupRuleChanges.$inferSelect;
+
+// One changed setting, already worded for players ("Exact score points", 3 → 5).
+export type RuleChangeItem = {
+  game: "lawro" | "lms";
+  key: string;
+  label: string;
+  from: string;
+  to: string;
+};
 
 // Per-group, admin-tunable rules for the two games a self-service group can
 // run. Stored (possibly partially) on `groups.rules`; always read back through
-// server/groupRules.ts's getGroupRules(), which merges the stored blob onto
-// DEFAULT_GROUP_RULES and bridges in the legacy `buyIn` / `lmsAllOutRule`
-// columns. Keeping the shape + defaults here (shared) means the server logic
-// and the client settings UI agree on exactly one source of truth.
+// resolveGroupRules() so missing keys fall back to DEFAULT_GROUP_RULES. Keeping
+// the shape + defaults here (shared) means the server logic and the client
+// settings UI agree on exactly one source of truth.
 //
 // Every default below reproduces the app's current hard-coded behaviour, so a
-// group with no overrides (and every pre-existing group) plays exactly as
-// before until its admin changes something.
+// group with no overrides (and every pre-existing group) plays exactly as before
+// until its admin changes something.
 
-// What happens to a Lawro player who has no pick when the deadline passes.
+// What happens to a Lawro player who has no pick when the gameweek deadline
+// passes.
 //  - "blank": they simply score nothing that gameweek (current behaviour).
 //  - "random": a random scoreline is filled in for them.
-export type LawroMissedPolicy = "blank" | "random";
+//  - "open_until_kickoff": the gameweek deadline doesn't lock everything at
+//    once — a player who missed it can still enter a prediction for any match
+//    in the gameweek that hasn't kicked off yet (each match locks at its own
+//    kick-off). Matches they never predict simply score nothing.
+export type LawroMissedPolicy = "blank" | "random" | "open_until_kickoff";
 
 // What happens to an LMS player who hasn't picked when the deadline passes.
 //  - "random": a random eligible team is assigned (current behaviour).
-//  - "eliminate": missing a pick knocks them out.
+//  - "eliminate": missing a pick counts as a losing pick — it costs a life, and
+//    only knocks the player out if it was their last one.
 export type LmsMissedPolicy = "random" | "eliminate";
 
 // What happens when every remaining LMS player is knocked out in the same
-// gameweek.
-//  - "rollover": no winner; a fresh competition opens for the same roster and
-//    the pot carries over (current behaviour).
-//  - "revive": everyone is given another life and play continues in the same
-//    competition (the public repo's existing alternative — preserved here).
-//  - "co_winners": the players who went out together share the win (recorded as
-//    joint winners); the competition ends.
-//  - "no_winner": no winner and no new competition — the competition just ends.
-export type LmsAllOutPolicy = "rollover" | "revive" | "co_winners" | "no_winner";
+// gameweek. Whichever applies, a new competition always opens straight after
+// for the same roster.
+//  - "rollover": no winner; everyone is back in for the next competition and
+//    the pot carries over into it (current behaviour).
+//  - "co_winners": the players who went out in that final gameweek share the
+//    pot (recorded as joint winners); nobody else does.
+// There used to be a third option, "no_winner" (the pot doesn't carry over).
+// It was removed as redundant; a group that still has it stored reads as
+// "rollover" because resolveGroupRules() falls back to the default for any
+// value not in LMS_ALL_OUT_POLICIES.
+export type LmsAllOutPolicy = "rollover" | "co_winners";
 
 export type GroupRules = {
   lawro: {
@@ -98,8 +121,7 @@ export type GroupRules = {
     jokerEnabled: boolean;
   };
   lms: {
-    // The buy-in / prize pot for a Last Man Standing competition. Bridged from
-    // the legacy `buyIn` column (default 10).
+    // The buy-in / prize pot for a Last Man Standing competition (default 10).
     buyIn: number;
     // How many lives a player has — i.e. how many losing picks it takes to knock
     // them out (default 1: one loss and you're gone).
@@ -109,8 +131,7 @@ export type GroupRules = {
     deadlineMinutesBeforeKickoff: number;
     // What happens to a player with no pick when the deadline passes.
     missedPickPolicy: LmsMissedPolicy;
-    // What happens when everyone still in goes out together. Bridged from the
-    // legacy `lmsAllOutRule` column (default "rollover").
+    // What happens when everyone still in goes out together.
     allOutPolicy: LmsAllOutPolicy;
   };
 };
@@ -132,21 +153,18 @@ export const DEFAULT_GROUP_RULES: GroupRules = {
   },
 };
 
-export const LAWRO_MISSED_POLICIES: readonly LawroMissedPolicy[] = ["blank", "random"];
-export const LMS_MISSED_POLICIES: readonly LmsMissedPolicy[] = ["random", "eliminate"];
-export const LMS_ALL_OUT_POLICIES: readonly LmsAllOutPolicy[] = [
-  "rollover",
-  "revive",
-  "co_winners",
-  "no_winner",
+export const LAWRO_MISSED_POLICIES: readonly LawroMissedPolicy[] = [
+  "blank",
+  "random",
+  "open_until_kickoff",
 ];
+export const LMS_MISSED_POLICIES: readonly LmsMissedPolicy[] = ["random", "eliminate"];
+export const LMS_ALL_OUT_POLICIES: readonly LmsAllOutPolicy[] = ["rollover", "co_winners"];
 
 // Merge a stored (partial / null / legacy) rules blob onto the defaults so
 // callers always get a complete, safe GroupRules. Numbers are coerced and
 // clamped to sane bounds; unknown enum values fall back to the default; unknown
-// keys are ignored. Does NOT read the legacy columns itself — callers that have
-// the group row (server/groupRules.ts) bridge `buyIn` / `lmsAllOutRule` in
-// before calling this.
+// keys are ignored.
 export function resolveGroupRules(stored: Partial<GroupRules> | null | undefined): GroupRules {
   const clampInt = (v: unknown, fallback: number, min: number, max: number): number => {
     const n = Number(v);
@@ -184,38 +202,6 @@ export function resolveGroupRules(stored: Partial<GroupRules> | null | undefined
   };
 }
 
-// One changed setting, already worded for players ("Points for an exact score",
-// 3 → 5). Built by describeRuleChanges and shown in the rule-change pop-up.
-export type RuleChangeItem = {
-  game: "lawro" | "lms";
-  key: string;
-  label: string;
-  from: string;
-  to: string;
-};
-
-// A log of every change a group's admin makes to its rules. Each row keeps the
-// rules before and after, plus a readable list of what changed, so (a) every
-// player gets a pop-up about changes they haven't seen (users.
-// last_seen_rule_change_id) and (b) Lawro rule changes are never retroactive:
-// a change applies from `lawroEffectiveSeason`/`lawroEffectiveGameweek` (the
-// first gameweek whose deadline hadn't passed when it was made), and earlier
-// gameweeks keep the rules in this row's `before` — see lawroRulesAt().
-export const groupRuleChanges = pgTable("group_rule_changes", {
-  id: serial("id").primaryKey(),
-  groupId: integer("group_id").notNull(),
-  changedByUserId: integer("changed_by_user_id"),
-  changedAt: timestamp("changed_at").notNull().defaultNow(),
-  before: json("before").$type<GroupRules>().notNull(),
-  after: json("after").$type<GroupRules>().notNull(),
-  changes: json("changes").$type<RuleChangeItem[]>().notNull(),
-  // Set only when the change touched Lawro rules.
-  lawroEffectiveSeason: text("lawro_effective_season"),
-  lawroEffectiveGameweek: integer("lawro_effective_gameweek"),
-});
-
-export type GroupRuleChange = typeof groupRuleChanges.$inferSelect;
-
 // The Lawro rules that govern one gameweek, given the group's current rules and
 // its rule-change log. A gameweek before a change's effective gameweek keeps
 // that change's `before` rules, so editing the rules never rescores (or
@@ -247,7 +233,7 @@ export const users = pgTable(
   "users",
   {
     id: serial("id").primaryKey(),
-    // Username is unique *within a group* (so "Alex" can exist in united
+    // Username is unique *within a group* (so "Alex" can exist in another group
     // AND in lastman as two different rows), not globally.
     username: text("username").notNull(),
     password: text("password").notNull(),
@@ -262,16 +248,16 @@ export const users = pgTable(
     // existing rows can be backfilled on boot; new users get one at creation.
     loginCode: text("login_code"),
     // Per-person game visibility override. NULL means "inherit the group's
-    // enabledGames" (the default — so e.g. everyone in a group sees Lawro
-    // whether or not they've played it). When set, it narrows the group's games
-    // for this one person: it's intersected with the group's enabledGames, so a
-    // player can be hidden from a game the group runs (e.g. a member who only
+    // enabledGames" (the default). When set, it narrows the group's games for this
+    // one person: it's intersected with the group's enabledGames, so a player
+    // can be hidden from a game the group runs (e.g. a Rovers member who only
     // plays LMS and shouldn't see the Lawro tab) but never shown a game the
     // group doesn't offer. Managed per-player from /admin/players.
     enabledGames: json("enabled_games").$type<string[]>(),
     // The newest group_rule_changes id this player has acknowledged. Any rule
-    // change past this id pops up for them (see group_rule_changes); joiners
-    // start at the latest so they aren't shown changes made before they arrived.
+    // change in their group with a higher id (made by someone else) pops up for
+    // them once, so an admin can't change the rules unnoticed. 0 = none seen;
+    // players who join a group start at its latest change.
     lastSeenRuleChangeId: integer("last_seen_rule_change_id").notNull().default(0),
   },
   (table) => ({
@@ -321,17 +307,28 @@ export const predictions = pgTable("predictions", {
   // this is always false. Kept to avoid a destructive column drop; safe to
   // remove in a future schema change.
   isAutoPick: boolean("is_auto_pick").notNull().default(false),
+  // True for a pick entered after the gameweek deadline under the Lawro
+  // "open_until_kickoff" missed-deadline rule. Such a late pick can still be
+  // adjusted until its own match kicks off; picks made before the deadline lock
+  // at the deadline as usual. Always set by the server, never by the client.
+  isLatePick: boolean("is_late_pick").notNull().default(false),
   // The player's Joker for this gameweek under the Lawro Joker rule: its points
   // are doubled. At most one per player per gameweek; set only through
   // PUT /api/predictions/:id/joker, never from the create payload. Ignored when
-  // the rule is off for the gameweek (see lawroRulesAt / getLawroRulesResolver).
+  // the rule is off for the gameweek (see lawroRulesAt).
   isJoker: boolean("is_joker").notNull().default(false),
-});
+}, (table) => ({
+  // One pick per player per match. A manual fix-up that was run twice once
+  // doubled a player's gameweek points; the database now refuses the copy.
+  // Before pushing this to a database that may hold duplicates, remove them
+  // first (keep the newest row per user_id + match_id).
+  userMatchUnique: unique("predictions_user_id_match_id_unique").on(table.userId, table.matchId),
+}));
 
 // Server-generated secrets, so they don't have to be set by hand. Holds the
 // group-cookie signing key (name "group_cookie_secret") when the
 // GROUP_COOKIE_SECRET env var isn't set — see server/groupAuth.ts. Never sent
-// to clients.
+// to clients, and skipped by the prod → dev sync.
 export const appSecrets = pgTable("app_secrets", {
   name: text("name").primaryKey(),
   value: text("value").notNull(),
@@ -363,6 +360,12 @@ export const lmsCompetitions = pgTable("lms_competitions", {
   winnerId: integer("winner_id"),
   coWinnerId: integer("co_winner_id"),
   prizeAmount: integer("prize_amount").default(35),
+  // The buy-in each player paid for this competition, saved from the group's
+  // LMS buy-in when it opens (and kept in step if the admin edits the buy-in
+  // before it goes live). NULL for the original hand-seeded groups' older
+  // competitions, whose stakes predate per-group rules — the LMS page derives
+  // those from its legacy per-season table instead.
+  stakeGbp: integer("stake_gbp"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -378,7 +381,11 @@ export const lmsSelections = pgTable("lms_selections", {
   id: serial("id").primaryKey(),
   participantId: integer("participant_id").notNull(),
   gameweek: integer("gameweek").notNull(),
-  teamId: integer("team_id").notNull(),
+  // The team the player picked. NULL marks a "missed pick" row recorded when a
+  // player has no selection at the deadline under the LMS "eliminate" rule: it
+  // carries result "l" so it counts as one lost life in the normal
+  // cumulative-loss elimination, without pretending they picked a real team.
+  teamId: integer("team_id"),
   matchId: integer("match_id"),
   result: text("result"), // "w", "l", "postponed", "pending"
   isRandomlyAssigned: text("is_randomly_assigned").default("false"), // "true", "false"
@@ -495,6 +502,12 @@ export const insertActivityLogSchema = createInsertSchema(activityLogs).omit({
   createdAt: true,
 });
 
+
+
+
+
+
+
 // Insert types
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type InsertTeam = z.infer<typeof insertTeamSchema>;
@@ -564,12 +577,3 @@ export type PushSubscription = typeof pushSubscriptions.$inferSelect;
 export type InsertPushSubscription = typeof pushSubscriptions.$inferInsert;
 export type ReminderSend = typeof reminderSends.$inferSelect;
 
-// Flashscore scraper types
-export type ScrapedMatch = {
-  homeTeam: string;
-  awayTeam: string;
-  homeScore?: number;
-  awayScore?: number;
-  status: string;
-  time: string;
-};

@@ -104,3 +104,16 @@ export async function plDeadlineWithin(windowMs: number, now: number = Date.now(
   }
   return false;
 }
+
+// The first kickoff (UTC ms) of every current-season gameweek, from the same
+// in-memory snapshot — no DB read unless the snapshot is due a refresh.
+export async function plGameweekFirstKickoffs(now: number = Date.now()): Promise<number[]> {
+  await ensurePl(now);
+  const firstByGw = new Map<number, number>();
+  for (const f of plSnapshot ?? []) {
+    if (f.gameweek == null || Number.isNaN(f.kickoffMs)) continue;
+    const cur = firstByGw.get(f.gameweek);
+    if (cur == null || f.kickoffMs < cur) firstByGw.set(f.gameweek, f.kickoffMs);
+  }
+  return Array.from(firstByGw.values());
+}

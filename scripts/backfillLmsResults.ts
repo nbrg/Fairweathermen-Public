@@ -7,7 +7,7 @@
 // results are normally written by the live-score sync at the moment a match
 // transitions to `finished` (server/footballDataApi.ts → updateLmsSelectionsForMatch).
 // If a competition is created/randomised on a gameweek whose matches are ALREADY
-// finished (e.g. a late-created comp, or a database restore), that transition
+// finished (e.g. a late-created comp, or a prod→dev DB mirror), that transition
 // never fires for it, the selections keep result=null, and the competition is
 // stuck forever. This recomputes those results from the finished matches — same
 // rule as the live sync (a draw counts as a loss) — and hands off to the normal

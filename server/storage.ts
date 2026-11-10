@@ -9,7 +9,12 @@ import {
 } from "@shared/schema";
 import { londonStringToUtcMs } from "@shared/time";
 import { db } from "./db";
-import { and, eq, desc, isNull, inArray } from "drizzle-orm";
+import { and, eq, desc, inArray, isNull } from "drizzle-orm";
+
+type PredictionSaveInput = {
+  userId: number; matchId: number; homeScore: number | null; awayScore: number | null;
+  isAutoPick?: boolean; isJoker?: boolean;
+};
 
 export interface IStorage {
   // User methods
@@ -33,25 +38,21 @@ export interface IStorage {
   getAllMatchesWithTeams(allSeasons?: boolean): Promise<MatchWithTeams[]>;
   getMatchesByGameweek(gameweek: number): Promise<MatchWithTeams[]>;
   getGameweekDeadline(gameweek: number): Promise<Date | null>;
-  clearAllMatches(): Promise<void>;
   deleteMatchesBySeason(season: string): Promise<number>;
   backfillNullSeasons(season: string): Promise<number>;
-  getTeams(): Promise<Team[]>;
   
   // Prediction methods
   getPrediction(id: number): Promise<Prediction | undefined>;
   getUserPredictions(userId: number): Promise<Prediction[]>;
-  getMatchPredictions(matchId: number): Promise<Prediction[]>;
   createPrediction(prediction: InsertPrediction): Promise<Prediction>;
+  savePrediction(input: PredictionSaveInput, validate: (existing: Prediction | undefined) => Promise<{ isLatePick: boolean }>): Promise<{ prediction: Prediction | null; previous: Prediction | undefined; changed: boolean }>;
   updatePrediction(id: number, homeScore: number, awayScore: number): Promise<Prediction | undefined>;
   deletePrediction(id: number): Promise<boolean>;
   setPredictionJoker(userId: number, predictionId: number, joker: boolean, gameweekMatchIds: number[]): Promise<void>;
   getAllPredictions(): Promise<Prediction[]>;
   getPredictionByUserAndMatch(userId: number, matchId: number): Promise<Prediction | undefined>;
   // Complex methods
-  getLeaderboard(): Promise<UserWithPredictions[]>;
   getUserPredictionsWithMatches(userId: number): Promise<PredictionWithMatch[]>;
-  getAllPredictionsWithMatches(): Promise<PredictionWithMatch[]>;
 
   // Last Man Standing methods
   getLmsCompetition(id: number): Promise<LmsCompetition | undefined>;
@@ -74,11 +75,11 @@ export interface IStorage {
   
   // LMS Selection Logging methods
   createLmsSelectionLog(log: InsertLmsSelectionLog): Promise<LmsSelectionLog>;
-  getLmsSelectionLogs(): Promise<any[]>; // Returns logs with human-readable names
 
   // Activity Logs
   createActivityLog(log: InsertActivityLog): Promise<ActivityLog>;
   getActivityLogs(limit?: number): Promise<ActivityLog[]>;
+
 }
 
 // We keep every season's fixtures in the `matches` table (for history), but the
@@ -298,38 +299,47 @@ export class DatabaseStorage implements IStorage {
       .where(eq(predictions.userId, userId));
   }
 
-  async getMatchPredictions(matchId: number): Promise<Prediction[]> {
-    return await db.select()
-      .from(predictions)
-      .where(eq(predictions.matchId, matchId));
+  async createPrediction(insertPrediction: InsertPrediction): Promise<Prediction> {
+    // All creators (including missed-pick filling and older clients) share the
+    // same row lock, so simultaneous creates cannot insert duplicate picks.
+    const result = await this.savePrediction(insertPrediction, async existing => ({
+      isLatePick: existing?.isLatePick ?? insertPrediction.isLatePick ?? false,
+    }));
+    return result.prediction!;
   }
 
-  async createPrediction(insertPrediction: InsertPrediction): Promise<Prediction> {
-    // Check if the user already has a prediction for this match
-    const existingPrediction = await this.getPredictionByUserAndMatch(
-      insertPrediction.userId,
-      insertPrediction.matchId
-    );
-    
-    if (existingPrediction) {
-      // Update existing prediction
-      const [updatedPrediction] = await db.update(predictions)
-        .set({
-          homeScore: insertPrediction.homeScore,
-          awayScore: insertPrediction.awayScore
-        })
-        .where(eq(predictions.id, existingPrediction.id))
-        .returning();
-        
-      return updatedPrediction;
-    }
-    
-    // Create new prediction
-    const [prediction] = await db.insert(predictions)
-      .values(insertPrediction)
-      .returning();
-      
-    return prediction;
+  async savePrediction(
+    input: PredictionSaveInput,
+    validate: (existing: Prediction | undefined) => Promise<{ isLatePick: boolean }>,
+  ): Promise<{ prediction: Prediction | null; previous: Prediction | undefined; changed: boolean }> {
+    return db.transaction(async tx => {
+      // The user row exists even before their first prediction. Locking it
+      // serializes check/insert across processes without a schema migration.
+      const [owner] = await tx.select({ id: users.id }).from(users)
+        .where(eq(users.id, input.userId)).for("update");
+      if (!owner) throw new Error("Prediction owner not found");
+      const identity = and(eq(predictions.userId, input.userId), eq(predictions.matchId, input.matchId));
+      const [previous] = await tx.select().from(predictions).where(identity);
+      const flags = await validate(previous);
+      if (input.homeScore === null || input.awayScore === null) {
+        if (previous) await tx.delete(predictions).where(identity);
+        return { prediction: null, previous, changed: !!previous };
+      }
+      if (previous) {
+        if (previous.homeScore === input.homeScore && previous.awayScore === input.awayScore) {
+          return { prediction: previous, previous, changed: false };
+        }
+        const [prediction] = await tx.update(predictions)
+          .set({ homeScore: input.homeScore, awayScore: input.awayScore })
+          .where(identity).returning();
+        return { prediction, previous, changed: true };
+      }
+      const [prediction] = await tx.insert(predictions).values({
+        ...input, homeScore: input.homeScore, awayScore: input.awayScore,
+        isAutoPick: input.isAutoPick ?? false, isJoker: input.isJoker ?? false, isLatePick: flags.isLatePick,
+      }).returning();
+      return { prediction, previous, changed: true };
+    });
   }
   
   async updatePrediction(id: number, homeScore: number, awayScore: number): Promise<Prediction | undefined> {
@@ -441,68 +451,6 @@ export class DatabaseStorage implements IStorage {
     return predictionWithMatches;
   }
 
-  async getAllPredictionsWithMatches(): Promise<PredictionWithMatch[]> {
-    const predictions = await this.getAllPredictions();
-    const predictionWithMatches: PredictionWithMatch[] = [];
-    
-    for (const prediction of predictions) {
-      const matchWithTeams = await this.getMatchWithTeams(prediction.matchId);
-      
-      if (matchWithTeams) {
-        const { points, status } = this.calculatePoints(prediction, matchWithTeams);
-        
-        predictionWithMatches.push({
-          ...prediction,
-          match: matchWithTeams,
-          points,
-          status: status as any
-        });
-      }
-    }
-    
-    return predictionWithMatches;
-  }
-
-  async getLeaderboard(): Promise<UserWithPredictions[]> {
-    const users = await this.getAllUsers();
-    const userWithPredictions: UserWithPredictions[] = [];
-    
-    for (const user of users) {
-      const predictionWithMatches = await this.getUserPredictionsWithMatches(user.id);
-      
-      let exactScores = 0;
-      let correctResults = 0;
-      let totalPoints = 0;
-      
-      for (const prediction of predictionWithMatches) {
-        if (prediction.status === "exact_score") {
-          exactScores++;
-          totalPoints += 3;
-        } else if (prediction.status === "correct_result") {
-          correctResults++;
-          totalPoints += 1;
-        }
-      }
-      
-      userWithPredictions.push({
-        ...user,
-        predictions: predictionWithMatches,
-        exactScores,
-        correctResults,
-        totalPoints
-      });
-    }
-    
-    // Tiebreak chain: total points, exact scores, correct results (all
-    // descending), then username alphabetically — matching getOptimizedLeaderboard.
-    return userWithPredictions.sort((a, b) => {
-      if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
-      if (b.exactScores !== a.exactScores) return b.exactScores - a.exactScores;
-      if (b.correctResults !== a.correctResults) return b.correctResults - a.correctResults;
-      return (a.username || "").localeCompare(b.username || "");
-    });
-  }
-
   // Last Man Standing methods - using proper Drizzle syntax
   async getLmsCompetition(id: number): Promise<LmsCompetition | undefined> {
     const [row] = await db.select().from(lmsCompetitions).where(eq(lmsCompetitions.id, id));
@@ -548,7 +496,11 @@ export class DatabaseStorage implements IStorage {
       startGameweek: competition.startGameweek,
       currentGameweek: competition.currentGameweek,
       status: competition.status || 'active',
-      winnerId: competition.winnerId || null
+      winnerId: competition.winnerId || null,
+      // Persist the buy-in when given (a group's configured LMS buy-in);
+      // otherwise the column default applies.
+      ...(competition.prizeAmount != null ? { prizeAmount: competition.prizeAmount } : {}),
+      ...(competition.stakeGbp != null ? { stakeGbp: competition.stakeGbp } : {}),
     }).returning();
     
     console.log(`Created competition ${result[0].id} for group ${competition.groupId || 1} successfully`);
@@ -578,6 +530,9 @@ export class DatabaseStorage implements IStorage {
         console.log(`Updating competition ${id} winner to ${data.winnerId}`);
         updateData.winnerId = data.winnerId;
       }
+
+      if (data.prizeAmount !== undefined) updateData.prizeAmount = data.prizeAmount;
+      if (data.stakeGbp !== undefined) updateData.stakeGbp = data.stakeGbp;
 
       const result = await db.update(lmsCompetitions)
         .set(updateData)
@@ -671,30 +626,6 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getLmsSelectionLogs(): Promise<any[]> {
-    // Get logs with human-readable names using team abbreviations
-    const query = `
-      SELECT 
-        lsl.id,
-        lsl.gameweek,
-        u.username as player_name,
-        ot.short_name as original_team,
-        nt.short_name as new_team,
-        lsl.ip_address,
-        lsl.city,
-        lsl.country,
-        lsl.created_at
-      FROM lms_selection_logs lsl
-      JOIN lms_participants lp ON lsl.participant_id = lp.id
-      JOIN users u ON lp.user_id = u.id
-      LEFT JOIN teams nt ON lsl.new_team_id = nt.id
-      LEFT JOIN teams ot ON lsl.original_team_id = ot.id
-      ORDER BY lsl.created_at DESC
-    `;
-    const result = await db.execute(query);
-    return result.rows;
-  }
-
   async createActivityLog(log: InsertActivityLog): Promise<ActivityLog> {
     const result = await db.insert(activityLogs).values({
       type: log.type,
@@ -717,10 +648,6 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Additional methods needed for Excel import
-  async clearAllMatches(): Promise<void> {
-    await db.delete(matches);
-  }
-
   // Delete only one season's fixtures (used to re-import a season idempotently
   // without touching other seasons' history).
   async deleteMatchesBySeason(season: string): Promise<number> {
@@ -737,11 +664,6 @@ export class DatabaseStorage implements IStorage {
       .returning();
     return updated.length;
   }
-
-  async getTeams(): Promise<Team[]> {
-    return await this.getAllTeams();
-  }
-
 }
 
 // Use the database storage implementation

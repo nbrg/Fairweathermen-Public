@@ -1,47 +1,54 @@
-import type { Express } from "express";
+import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
 import crypto from "crypto";
+import {
+  describeRuleChanges,
+  getGroupRules,
+  getLawroRulesResolver,
+  latestRuleChangeId,
+  unseenRuleChanges,
+} from "./groupRules";
+import { isCityGroup, normaliseGroupName } from "@shared/originalGroups";
+import { NAV_HIDDEN_GAMES, landingGame } from "@shared/navGames";
+import { isClientEvent, sanitizeEventDetail } from "@shared/activityEvents";
 import { storage } from "./storage";
-import { runScraper } from "./scraper";
-import { insertTeamSchema, insertMatchSchema, insertPredictionSchema, REMINDER_LEAD_PRESETS_MINUTES } from "@shared/schema";
+import { insertTeamSchema, insertMatchSchema, insertPredictionSchema, REMINDER_LEAD_PRESETS_MINUTES, resolveGroupRules, DEFAULT_GROUP_RULES, type GroupRules, type RuleChangeItem } from "@shared/schema";
 import { getVisitorStats, updateScreenResolution } from "./visitorTracker";
-import { getGroupRules } from "./groupRules";
 import { getLocationFromIP, getRealIP } from "./geolocation";
 import { z } from "zod";
 import * as cron from "node-cron";
 import { isStaticAssetPath } from "@shared/staticAssets";
+import changelog from "@shared/changelog.json";
+import { changelogDate } from "@shared/changelog";
+import { isGameweekLocked, lmsRosterWindow, placeInLms, seesLms, stopWaiting, waitingIds, type LmsPlacement } from "./lmsEnrolment";
 
-
-// Selections lock `lockMinutesBeforeKickoff` minutes before the gameweek's
-// first match. 0 = locks exactly at kickoff (the previous behaviour for every
-// group). The offset comes from the group's LMS rules.
-async function isGameweekLocked(
-  gameweek: number,
-  lockMinutesBeforeKickoff = 0,
-): Promise<boolean> {
-  const matches = await storage.getAllMatches();
-  const gameweekMatches = matches.filter(m => m.gameweek === gameweek);
-
-  if (gameweekMatches.length === 0) return false;
-
-  // Find the earliest match time for this gameweek
-  const earliestMatch = gameweekMatches.reduce((earliest, current) => {
-    const currentTime = new Date(current.matchTime).getTime();
-    const earliestTime = new Date(earliest.matchTime).getTime();
-    return currentTime < earliestTime ? current : earliest;
-  });
-
-  // Get current time in London timezone
-  const nowLondon = new Date().toLocaleString("en-US", {timeZone: "Europe/London"});
-  const now = new Date(nowLondon);
-
-  // Treat database time as London time; selections lock the configured number
-  // of minutes before the first match.
-  const matchTimeLondon = new Date(earliestMatch.matchTime).getTime();
-  const lockAt = matchTimeLondon - lockMinutesBeforeKickoff * 60 * 1000;
-  return now.getTime() >= lockAt;
+// Hides other players' LMS picks for any gameweek that hasn't locked yet, the
+// same as Lawro: the pick still shows as made (hidden: true) so the grid can
+// show who's picked, but its team and match are blanked, because the match id
+// alone narrows the pick to two teams. Your own picks are always shown. Lock
+// checks are cached per gameweek for the life of one response.
+function lmsPickRedactor(lockMinutesBeforeKickoff: number) {
+  const locked = new Map<number, Promise<boolean>>();
+  return async <T extends { gameweek: number; teamId: number | null; matchId?: number | null }>(
+    selection: T,
+    isMine: boolean,
+  ): Promise<T | (T & { hidden: true })> => {
+    if (isMine) return selection;
+    let lock = locked.get(selection.gameweek);
+    if (!lock) {
+      lock = isGameweekLocked(selection.gameweek, lockMinutesBeforeKickoff);
+      locked.set(selection.gameweek, lock);
+    }
+    if (await lock) return selection;
+    return { ...selection, teamId: null, matchId: null, hidden: true };
+  };
 }
 
+// A random pick whose randomiser wheel hasn't landed yet: shown as made, but
+// with no team or match, for every viewer (wheel: true tells the grid why).
+function hideForWheel<T extends { teamId: number | null; matchId?: number | null }>(selection: T) {
+  return { ...selection, teamId: null, matchId: null, hidden: true as const, wheel: true as const };
+}
 
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
@@ -49,15 +56,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Group auth: populate req.groupId from the cookie on every request, and
   // gate all /api routes that aren't part of the login flow or the admin
   // surface (which has its own API key auth).
-  const { groupContext, requireGroup, setUserCookie, clearUserCookie, userGameEnabled, initCookieSecret, logGrowthEvent, ensureVisitorId, isBotUserAgent } = await import("./groupAuth");
-  const { loginLimiter, adminLimiter } = await import("./rateLimits");
+  const {
+    groupContext,
+    requireGroup,
+    setUserCookie,
+    clearUserCookie,
+    userGameEnabled,
+    logGrowthEvent,
+    ensureVisitorId,
+    readVisitorId,
+    isBotUserAgent,
+    initCookieSecret,
+  } = await import("./groupAuth");
   await initCookieSecret();
   app.use(groupContext);
 
-  // Throttle brute-force attempts against the admin API key across the whole
-  // admin surface (all admin endpoints live under /api/admin). The login
-  // endpoint gets its own limiter where it's defined below.
-  app.use("/api/admin", adminLimiter);
+  // Throttle the credential-checking surfaces (see server/rateLimits.ts).
+  const { loginLimiter, loginGlobalLimiter, adminLimiter, adminGlobalLimiter, createGroupLimiter, trackEventLimiter } =
+    await import("./rateLimits");
+  // Admin-key guesses are throttled wherever they're made: the whole
+  // /api/admin surface, plus any other /api request that carries an
+  // x-api-key header (match/score edits, fixture syncs etc. accept the key
+  // too). Requests with the right key succeed and don't count.
+  app.use("/api", (req, res, next) => {
+    if (!req.path.startsWith("/admin/") && req.headers["x-api-key"] === undefined) return next();
+    adminLimiter(req, res, (err?: any) => (err ? next(err) : adminGlobalLimiter(req, res, next)));
+  });
 
   app.use("/api", (req, res, next) => {
     // Public endpoints — the auth surface itself can't be auth-gated.
@@ -70,7 +94,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Self-service group creation + invites are pre-login by nature.
       req.path === "/group/create" ||
       req.path.startsWith("/group/invite/") ||
-      req.path.startsWith("/group/join/")
+      req.path.startsWith("/group/join/") ||
+      // Visit/event tracking must also work for logged-out visitors — rows
+      // are just stored without a user.
+      req.path === "/track" ||
+      req.path === "/track/page-visit" ||
+      req.path === "/track/event"
     ) {
       return next();
     }
@@ -87,13 +116,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
     next();
   });
 
+  // Credential redaction: strip `password` and `loginCode` from every /api JSON
+  // response so endpoints that return whole user rows (e.g. /api/leaderboard,
+  // which spreads the user row into each leaderboard entry) can never leak a
+  // person's private login code or password. The admin surface legitimately
+  // hands the owner login codes to distribute, so requests carrying a valid
+  // admin API key are exempt.
+  const SENSITIVE_USER_KEYS = new Set(["password", "loginCode"]);
+  app.use("/api", (req, res, next) => {
+    const hasAdminKey =
+      !!process.env.ADMIN_API_KEY &&
+      req.headers["x-api-key"] === process.env.ADMIN_API_KEY;
+    if (hasAdminKey) return next();
+    // Rebuild plain objects without the sensitive keys; leave non-plain values
+    // (Dates, class instances, primitives) untouched so serialization is
+    // unchanged. A WeakSet guards against cyclic structures.
+    const redact = (value: any, seen: WeakSet<object>): any => {
+      if (Array.isArray(value)) return value.map((v) => redact(v, seen));
+      const isPlainObject =
+        value !== null &&
+        typeof value === "object" &&
+        (value.constructor === Object || value.constructor === undefined);
+      if (!isPlainObject) return value;
+      if (seen.has(value)) return value;
+      seen.add(value);
+      const out: Record<string, any> = {};
+      for (const [key, v] of Object.entries(value)) {
+        if (SENSITIVE_USER_KEYS.has(key)) continue;
+        out[key] = redact(v, seen);
+      }
+      return out;
+    };
+    const originalJson = res.json.bind(res);
+    res.json = (body: any) => originalJson(redact(body, new WeakSet()));
+    next();
+  });
+
   // ---- Group auth endpoints ----
 
-  // The group slug activated by default at login for someone in several
-  // groups, before they switch. City (Fairweathermen) is the year-round home
-  // group, so multi-group people (e.g. Morgan, Alex) land there rather than on
-  // Rovers. Falls back to their lowest-id group if they're not in City.
-  const DEFAULT_GROUP_SLUG = "city";
+  // The group activated by default at login for someone in several groups,
+  // before they switch: City is the year-round home group, so multi-group
+  // people (e.g. Morgan, Alex) land there rather than on Rovers.
+  // Falls back to their lowest-id group if they're not in it.
 
   // A user's effective game visibility: the group's games narrowed by the
   // user's per-person override. A null/undefined override means "inherit the
@@ -103,24 +167,92 @@ export async function registerRoutes(app: Express): Promise<Server> {
   function effectiveGames(
     groupGames: string[],
     userGames: string[] | null | undefined,
+    groupSlug?: string,
+    username?: string,
   ): string[] {
-    if (!userGames) return groupGames;
-    return groupGames.filter((g) => userGames.includes(g));
+    return userGames ? groupGames.filter((g) => userGames.includes(g)) : groupGames;
   }
+
 
   // True once a Prediction League ("Lawro") gameweek is past its deadline. The
   // deadline is the gameweek's first kickoff, brought forward by the group's
   // configured `lawro.deadlineMinutesBeforeKickoff` (default 0). At that point
-  // the whole gameweek locks for editing; anyone without a pick is left blank.
-  // A null gameweek or a gameweek with no fixtures is treated as unlocked.
-  async function gameweekLocked(gameweek: number | null, groupId?: number): Promise<boolean> {
+  // the whole gameweek locks for editing. A null gameweek or a gameweek with no
+  // fixtures is treated as unlocked.
+  // The offset is the one in force for that gameweek (an admin's edit only
+  // applies from the next open gameweek, so it can't re-lock or reopen one).
+  async function gameweekLocked(
+    gameweek: number | null,
+    groupId?: number,
+    season?: string | null,
+  ): Promise<boolean> {
     if (gameweek == null) return false;
     const deadline = await storage.getGameweekDeadline(gameweek);
     if (deadline == null) return false;
-    const { getGroupRules } = await import("./groupRules");
-    const rules = await getGroupRules(groupId);
-    const offsetMs = rules.lawro.deadlineMinutesBeforeKickoff * 60 * 1000;
+    const rules = (await getLawroRulesResolver(groupId))(season, gameweek);
+    const offsetMs = rules.deadlineMinutesBeforeKickoff * 60 * 1000;
     return Date.now() >= deadline.getTime() - offsetMs;
+  }
+
+  // Keep other players' Lawro picks secret until they're revealed. Shared by
+  // every endpoint that returns predictions, so none of them can be used to
+  // read a groupmate's scoreline (or Joker) before the deadline.
+  async function redactUnrevealedPredictions(
+    predictions: any[],
+    groupId: number | undefined,
+    viewerId: number | undefined,
+  ): Promise<any[]> {
+    // Keep other players' scorelines secret until each gameweek's deadline
+    // (its first kickoff) passes — otherwise they could be read straight off
+    // the network response. We still reveal *that* a pick exists (so the grid
+    // can show who has and hasn't submitted), just not the score: a
+    // pre-deadline pick from another player is redacted to { hidden: true }
+    // with no homeScore/awayScore. Your own picks are always returned in full;
+    // everyone's scorelines appear once the deadline is up. (Finished-match
+    // points are unaffected — a match only finishes well after its deadline.)
+    const { londonStringToUtcMs } = await import("@shared/time");
+    const allMatches = await storage.getAllMatchesWithTeams();
+    const deadlineByGw = new Map<number, number>();
+    for (const m of allMatches) {
+      if (m.gameweek == null) continue;
+      const ko = londonStringToUtcMs(m.matchTime);
+      if (Number.isNaN(ko)) continue;
+      const cur = deadlineByGw.get(m.gameweek);
+      if (cur == null || ko < cur) deadlineByGw.set(m.gameweek, ko);
+    }
+    const now = Date.now();
+    // Under the "open_until_kickoff" missed-deadline rule a player who missed
+    // the deadline can still add picks for matches that haven't kicked off, so
+    // each match's picks stay hidden until that match's own kick-off —
+    // otherwise a latecomer could copy everyone's revealed scorelines.
+    const lawroRulesFor = await getLawroRulesResolver(groupId);
+    return predictions.map((p) => {
+      if (p.userId === viewerId) return p;
+      const gw = p.match?.gameweek;
+      const perMatchReveal =
+        lawroRulesFor(p.match?.season, gw).missedPickPolicy === "open_until_kickoff";
+      const dl = gw != null ? deadlineByGw.get(gw) : undefined;
+      const matchKickoff = p.match?.matchTime ? londonStringToUtcMs(p.match.matchTime) : NaN;
+      const revealAt = perMatchReveal && !Number.isNaN(matchKickoff) ? matchKickoff : dl;
+      if (revealAt != null && now >= revealAt) return p;
+      // Redacted: keep who/which match (for the submitted/not view), drop the
+      // scoreline and any derived fields.
+      return { id: p.id, userId: p.userId, matchId: p.matchId, hidden: true, match: p.match } as any;
+    });
+  }
+
+  // Under the Lawro "open_until_kickoff" missed-deadline rule, a match stays
+  // open for late picks until its own kick-off, even after the gameweek
+  // deadline. False for every other rule.
+  async function lateEntryOpen(
+    match: { matchTime: string; gameweek: number | null; season?: string | null },
+    groupId?: number,
+  ): Promise<boolean> {
+    const rules = (await getLawroRulesResolver(groupId))(match.season, match.gameweek);
+    if (rules.missedPickPolicy !== "open_until_kickoff") return false;
+    const { londonStringToUtcMs } = await import("@shared/time");
+    const kickoff = londonStringToUtcMs(match.matchTime);
+    return !Number.isNaN(kickoff) && Date.now() < kickoff;
   }
 
   // Builds the session response for a person (identified by their login code),
@@ -154,36 +286,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
     // Pick the active row: the person's row in the preferred group if valid,
     // else the default (City) group, else their lowest-id group.
     const sortedRows = [...rows].sort((a, b) => a.groupId - b.groupId);
-    const defaultGroup = grps.find((g) => g.slug === DEFAULT_GROUP_SLUG);
+    const defaultGroup = grps.find((g) => isCityGroup(g));
     const activeRow =
       (preferredGroupId != null &&
         sortedRows.find((r) => r.groupId === preferredGroupId)) ||
       (defaultGroup && sortedRows.find((r) => r.groupId === defaultGroup.id)) ||
       sortedRows[0];
     const activeGroup = grps.find((g) => g.id === activeRow.groupId)!;
-    const { resolveGroupRulesForGroup, unseenRuleChanges } = await import("./groupRules");
-    // Rule changes this person hasn't acknowledged yet (excluding ones they made
-    // themselves), oldest first — drives the "the rules have changed" pop-up.
-    const ruleChanges = await unseenRuleChanges(
-      activeGroup.id,
-      activeRow.id,
-      activeRow.lastSeenRuleChangeId ?? 0,
-    );
     return {
       activeRow,
       payload: {
         id: activeGroup.id,
         slug: activeGroup.slug,
         name: activeGroup.name,
-        enabledGames: effectiveGames(activeGroup.enabledGames, activeRow.enabledGames),
-        // The active group's resolved rules (defaults merged, legacy columns
-        // bridged), so the client scores/labels using this group's settings.
-        rules: resolveGroupRulesForGroup(activeGroup),
+        enabledGames: effectiveGames(activeGroup.enabledGames, activeRow.enabledGames, activeGroup.slug, activeRow.username),
+        // The active group's rules, fully resolved onto the defaults so the
+        // client always gets complete values (and the Lawro leaderboard can use
+        // the group's configured points). Admin-tunable; see GroupRules.
+        rules: resolveGroupRules(activeGroup.rules),
         // True when the logged-in person created this group (is its admin), so
         // the client can show the owner-only group settings. Null ownerUserId
         // (the original hand-seeded groups) means nobody is the self-service
         // admin, so this is false for everyone there.
         isOwner: activeGroup.ownerUserId != null && activeGroup.ownerUserId === activeRow.id,
+        // True for a self-service group (one created via /create, so it has an
+        // admin and admin-set rules). The original hand-seeded groups have no
+        // owner; their LMS stakes and history still come from the client's
+        // legacy table rather than group.rules.
+        selfService: activeGroup.ownerUserId != null,
+        // Rule changes made by someone else since this player last looked —
+        // the client shows them in a pop-up until acknowledged, so an admin
+        // can't quietly change the rules.
+        ruleChanges: await unseenRuleChanges(activeGroup.id, activeRow.id, activeRow.lastSeenRuleChangeId),
         user: { id: activeRow.id, username: activeRow.username },
         // Each group the person belongs to, with the games they can see there
         // (their per-group override applied). Drives the header's cross-group
@@ -195,11 +329,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
             id: g.id,
             slug: g.slug,
             name: g.name,
-            enabledGames: effectiveGames(g.enabledGames, row?.enabledGames),
+            enabledGames: effectiveGames(g.enabledGames, row?.enabledGames, g.slug, row?.username),
           };
         }),
-        // Unacknowledged rule changes for the "the rules have changed" pop-up.
-        ruleChanges,
       },
     };
   }
@@ -210,7 +342,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // list of groups they can switch between. The endpoint path is kept for
   // backwards-compat with the client, but the code is now a per-person code
   // rather than a group slug.
-  app.post("/api/group/login", loginLimiter, async (req, res) => {
+  app.post("/api/group/login", loginLimiter, loginGlobalLimiter, async (req, res) => {
     try {
       const code = String(req.body?.code ?? "").trim().toLowerCase();
       if (!code) return res.status(400).json({ error: "Code required" });
@@ -245,6 +377,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // League ("Lawro").
   const SELF_SERVE_GAMES = ["lms", "predictions"] as const;
 
+  // Turn a group name into a URL-safe slug. The slug is still unique per group
+  // (it's a NOT NULL UNIQUE column and the old access-code), but login is now
+  // per-person so it's no longer typed by anyone — a readable derived slug plus
+  // a short random suffix for uniqueness is plenty.
   function slugifyName(name: string): string {
     const base = name
       .toLowerCase()
@@ -261,7 +397,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const { eq } = await import("drizzle-orm");
     const base = slugifyName(name);
     for (let attempt = 0; attempt < 25; attempt++) {
-      const suffix = crypto.randomBytes(3).toString("hex");
+      const suffix = crypto.randomBytes(3).toString("hex"); // 6 hex chars
       const slug = `${base}-${suffix}`;
       const [existing] = await db.select({ id: groups.id }).from(groups).where(eq(groups.slug, slug));
       if (!existing) return slug;
@@ -270,70 +406,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   }
 
   function newInviteToken(): string {
+    // ~128 bits, URL-safe. Unguessable — this is the only gate on joining.
     return crypto.randomBytes(16).toString("base64url");
-  }
-
-  // True when the logged-in person is the admin (owner) of their active group.
-  async function isActiveGroupOwner(req: any): Promise<boolean> {
-    if (!req.userId || !req.groupId) return false;
-    const { db } = await import("./db");
-    const { groups } = await import("@shared/schema");
-    const { eq } = await import("drizzle-orm");
-    const [group] = await db
-      .select({ ownerUserId: groups.ownerUserId })
-      .from(groups)
-      .where(eq(groups.id, req.groupId));
-    return !!group && group.ownerUserId != null && group.ownerUserId === req.userId;
-  }
-
-  // The player row `id` if it belongs to the caller's active group.
-  async function playerInActiveGroup(req: any, id: number) {
-    if (!Number.isInteger(id)) return undefined;
-    const player = await storage.getUser(id);
-    return player && player.groupId === req.groupId ? player : undefined;
-  }
-
-  // The group's current LMS competition and whether players can still be moved
-  // in or out of it: only until its first deadline, so nobody joins or leaves
-  // a competition that's already under way.
-  async function lmsRosterWindow(groupId: number) {
-    const competition = await storage.getCurrentLmsCompetition(groupId);
-    if (!competition) return { competition: undefined, open: false };
-    const rules = await getGroupRules(groupId);
-    const locked = await isGameweekLocked(competition.startGameweek, rules.lms.deadlineMinutesBeforeKickoff);
-    return { competition, open: !locked };
-  }
-
-  // Whether a player has any game history in this group. Players with history
-  // can't be removed (it would rewrite past leaderboards and LMS results).
-  async function playerHasHistory(userId: number): Promise<boolean> {
-    const { db } = await import("./db");
-    const { predictions, lmsParticipants, lmsSelections, lmsCompetitions } = await import("@shared/schema");
-    const { and, eq } = await import("drizzle-orm");
-    const [pred] = await db.select({ id: predictions.id }).from(predictions).where(eq(predictions.userId, userId)).limit(1);
-    if (pred) return true;
-    const [lmsPick] = await db
-      .select({ id: lmsSelections.id })
-      .from(lmsSelections)
-      .innerJoin(lmsParticipants, eq(lmsSelections.participantId, lmsParticipants.id))
-      .where(eq(lmsParticipants.userId, userId))
-      .limit(1);
-    if (lmsPick) return true;
-    const [pastComp] = await db
-      .select({ id: lmsParticipants.id })
-      .from(lmsParticipants)
-      .innerJoin(lmsCompetitions, eq(lmsParticipants.competitionId, lmsCompetitions.id))
-      .where(and(eq(lmsParticipants.userId, userId), eq(lmsCompetitions.status, "completed")))
-      .limit(1);
-    return !!pastComp;
   }
 
   // POST /api/group/create — public. Anyone can create a group. Body:
   //   { groupName, adminName, games: string[] }
   // Creates the group, makes the caller its first player AND its admin (owner),
   // mints an invite token, logs the caller in, and returns their login code and
-  // the invite link to share.
-  app.post("/api/group/create", loginLimiter, async (req, res) => {
+  // the invite link to share. The caller is the only one who can later edit the
+  // group's rules (they're the ownerUserId).
+  app.post("/api/group/create", createGroupLimiter, async (req, res) => {
     try {
       const groupName = String(req.body?.groupName ?? "").trim();
       const adminName = String(req.body?.adminName ?? "").trim();
@@ -357,38 +440,58 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { eq } = await import("drizzle-orm");
       const { codeForNewSelfServiceRow } = await import("./loginCodes");
 
+      // Group names must be unique (ignoring case and spacing), across every
+      // group — original ones included — so nobody can pass their group off
+      // as another, e.g. a second "Fairweathermen".
+      const wanted = normaliseGroupName(groupName);
+      const existingNames = await db.select({ name: groups.name }).from(groups);
+      if (existingNames.some((g) => normaliseGroupName(g.name) === wanted)) {
+        return res.status(409).json({ error: "That group name is already taken — please pick another" });
+      }
+
       const slug = await uniqueGroupSlug(groupName);
       const inviteToken = newInviteToken();
 
+      // Create the group first (owner filled in once we have the user id).
       const [group] = await db
         .insert(groups)
-        .values({ slug, name: groupName, enabledGames: games as string[], inviteToken })
+        .values({
+          slug,
+          name: groupName,
+          enabledGames: games as string[],
+          inviteToken,
+        })
         .returning();
 
+      // Create the admin's player row + personal login code, then mark them as
+      // the group's owner. The code is never looked up by name (that would hand
+      // anyone who types "Alex" Alex's login): a signed-in caller keeps their
+      // own code, anyone else gets a fresh one.
       const [adminRow] = await db
         .insert(users)
         .values({
           username: adminName,
           password: "password",
           groupId: group.id,
-          // Never looked up by name (that would hand anyone who types an
-          // existing player's name that player's login): a signed-in caller
-          // keeps their own code, anyone else gets a fresh one.
           loginCode: await codeForNewSelfServiceRow(req.userId),
         })
         .returning();
       await db.update(groups).set({ ownerUserId: adminRow.id }).where(eq(groups.id, group.id));
 
-      // If the group plays LMS, open its first competition now (at the next
-      // gameweek that hasn't kicked off). Best-effort: a failure here must not
-      // stop the group being created.
-      try {
-        const { ensureLmsCompetitionForGroup } = await import("./lmsAutoStart");
-        await ensureLmsCompetitionForGroup(group.id);
-      } catch (err) {
-        console.error(`[/api/group/create] couldn't auto-start LMS for group ${group.id}:`, err);
+      // An LMS group starts playing straight away: open its first competition
+      // at the next gameweek that hasn't kicked off yet (players who join via
+      // the invite link are enrolled into it). A failure here mustn't block
+      // creating the group — the background sweep retries it.
+      if (games.includes("lms")) {
+        try {
+          const { ensureLmsCompetitionForGroup } = await import("./lmsAutoStart");
+          await ensureLmsCompetitionForGroup(group.id);
+        } catch (err) {
+          console.error(`[/api/group/create] couldn't auto-start LMS for group ${group.id}:`, err);
+        }
       }
 
+      // Log the creator in on the new group.
       const session = await buildSession(adminRow.loginCode!, group.id);
       if (session) setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
 
@@ -399,11 +502,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
       const inviteUrl = `${req.protocol}://${req.get("host")}/join/${inviteToken}`;
+      // NB: returned as `code`, not `loginCode` — the global /api redaction
+      // middleware strips any `loginCode` key (so bulk user dumps can't leak
+      // codes). Here we're deliberately handing the creator their OWN code over
+      // their own freshly-authenticated session, which is the whole point.
       res.json({
         ok: true,
-        // Return the login code as `code`, not `loginCode`: the global /api
-        // scrub middleware (server/index.ts) strips any `loginCode` key from
-        // non-admin responses, so this creation flow would otherwise lose it.
         code: adminRow.loginCode,
         inviteToken,
         inviteUrl,
@@ -416,7 +520,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // GET /api/group/invite/:token — public. Describes the group behind an invite
-  // link so the join page can greet the player. 404 for an unknown token.
+  // link so the join page can greet the player ("Join <name>"). Returns 404 for
+  // an unknown token. Deliberately exposes only the group's name + games.
   app.get("/api/group/invite/:token", async (req, res) => {
     try {
       const token = String(req.params.token ?? "");
@@ -444,13 +549,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // POST /api/group/join/:token — public. A player joins a group via its invite
-  // link. Body: { name }. Creates their player row + login code, enrols them
-  // into any active LMS competition, logs them in, and returns their login code.
-  // A name already taken in the group is refused (unless the caller is signed in
-  // as that very player): handing back an existing player's code to anyone who
-  // types their name would let them sign in as that player. A caller who is
-  // already signed in elsewhere keeps their code, so the group joins their
-  // switcher.
+  // link. Body: { name }. Creates their player row + personal login code,
+  // enrols them into any active LMS competition, logs them in, and returns their
+  // login code to show them. A name that's already taken in the group is refused
+  // (unless the caller is signed in as that very player, which is a harmless
+  // no-op) — handing back an existing player's code to anyone who types their
+  // name would let them sign in as that player. If the caller is already signed
+  // in elsewhere, the new row shares their code so it shows in their switcher.
   app.post("/api/group/join/:token", loginLimiter, async (req, res) => {
     try {
       const token = String(req.params.token ?? "");
@@ -469,7 +574,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!group) return res.status(404).json({ error: "This invite link is invalid or has expired" });
 
       // Names are matched case- and space-insensitively so "dave" can't sit
-      // alongside "Dave".
+      // alongside "Dave" and confuse everyone.
       const [existing] = await db
         .select()
         .from(users)
@@ -486,10 +591,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       const linked = req.userId != null;
       if (!player) {
-        // Start a new joiner at the group's latest rule change so they aren't
-        // shown the "rules have changed" pop-up for changes made before they
-        // arrived.
-        const { latestRuleChangeId } = await import("./groupRules");
         const [row] = await db
           .insert(users)
           .values({
@@ -497,23 +598,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
             password: "password",
             groupId: group.id,
             loginCode: await codeForNewSelfServiceRow(req.userId),
+            // Changes made before they joined aren't news to them.
             lastSeenRuleChangeId: await latestRuleChangeId(group.id),
           })
           .returning();
         player = row;
       }
 
-      const competition = await storage.getCurrentLmsCompetition(group.id);
-      if (competition) {
-        const participants = await storage.getLmsParticipantsByCompetition(competition.id);
-        if (!participants.some((p) => p.userId === player.id)) {
-          await storage.createLmsParticipant({
-            competitionId: competition.id,
-            userId: player.id,
-            isActive: "true",
-          } as any);
-        }
-      }
+      // Into the group's LMS competition if it hasn't started yet, so they can
+      // pick straight away; otherwise they wait for the next one (the same rule
+      // as the admin add-player flow — see lmsEnrolment.ts).
+      await placeInLms(group.id, player.id, { ipAddress: getRealIP(req), userAgent: req.get("User-Agent") ?? null });
 
       await logGrowthEvent(req, "group_joined", {
         userId: player.id,
@@ -523,7 +618,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const session = await buildSession(player.loginCode!, group.id);
       if (session) setUserCookie(res, session.activeRow.id, session.activeRow.groupId);
-      // `code`, not `loginCode`: the /api scrub middleware strips `loginCode`.
+      // Returned as `code` (not `loginCode`) so the /api redaction middleware
+      // doesn't strip it — this is the joiner's own code, shown to them once.
       res.json({ ok: true, code: player.loginCode, linked, group: session?.payload ?? null });
     } catch (err: any) {
       console.error("[/api/group/join POST] error:", err);
@@ -531,32 +627,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // GET /api/group/rules — the active group's resolved rules + whether the
-  // caller may edit them (is the owner). Any logged-in member can read.
+  // ---- Per-group rules (admin-tunable) ----
+
+  // True when the logged-in person is the admin (owner) of their active group.
+  async function isActiveGroupOwner(req: any): Promise<boolean> {
+    if (!req.userId || !req.groupId) return false;
+    const { db } = await import("./db");
+    const { groups } = await import("@shared/schema");
+    const { eq } = await import("drizzle-orm");
+    const [group] = await db
+      .select({ ownerUserId: groups.ownerUserId })
+      .from(groups)
+      .where(eq(groups.id, req.groupId));
+    return !!group && group.ownerUserId != null && group.ownerUserId === req.userId;
+  }
+
+  // Which rules the admin can still change, and from when:
+  //  - LMS rules freeze once the group's running competition has passed its
+  //    first deadline (so between competitions the next one can be adjusted);
+  //  - Lawro rules never freeze for the season. An edit applies from the first
+  //    gameweek whose deadline hasn't passed yet (`lawroEffectiveFrom`); earlier
+  //    gameweeks keep the rules they were played under (see lawroRulesAt), and
+  //    every player is shown a pop-up about the change.
+  async function gamesLive(groupId: number): Promise<{
+    lms: boolean;
+    lawroEffectiveFrom: { season: string | null; gameweek: number } | null;
+  }> {
+    const rules = await getGroupRules(groupId);
+    let lms = false;
+    const competition = await storage.getCurrentLmsCompetition(groupId);
+    if (competition) {
+      lms = await isGameweekLocked(competition.startGameweek, rules.lms.deadlineMinutesBeforeKickoff);
+    }
+    const { nextUnstartedGameweek } = await import("./lmsAutoStart");
+    const lawroEffectiveFrom = await nextUnstartedGameweek(rules.lawro.deadlineMinutesBeforeKickoff);
+    return { lms, lawroEffectiveFrom };
+  }
+
+  // GET /api/group/rules — the settings page's data: the active group's
+  // resolved rules, its enabled games, which games have already started (and so
+  // have frozen rules), and the invite link. Owner only — the settings page is
+  // the admin's alone. (Every member still gets the resolved rules in their
+  // /api/group/me session payload, which the games need for scoring and the
+  // rules text.)
   app.get("/api/group/rules", requireGroup, async (req, res) => {
     try {
+      if (!(await isActiveGroupOwner(req))) {
+        return res.status(403).json({ error: "Only the group admin can view the group settings" });
+      }
       const { db } = await import("./db");
       const { groups } = await import("@shared/schema");
       const { eq } = await import("drizzle-orm");
-      const { resolveGroupRulesForGroup } = await import("./groupRules");
       const [group] = await db
-        .select({
-          rules: groups.rules,
-          buyIn: groups.buyIn,
-          lmsAllOutRule: groups.lmsAllOutRule,
-          enabledGames: groups.enabledGames,
-          inviteToken: groups.inviteToken,
-        })
+        .select({ rules: groups.rules, enabledGames: groups.enabledGames, inviteToken: groups.inviteToken })
         .from(groups)
         .where(eq(groups.id, req.groupId!));
       if (!group) return res.status(404).json({ error: "No such group" });
-      const isOwner = await isActiveGroupOwner(req);
       res.json({
-        rules: resolveGroupRulesForGroup(group),
+        rules: resolveGroupRules(group.rules),
         enabledGames: group.enabledGames,
-        isOwner,
-        // Only the admin needs the invite link (to share it).
-        inviteToken: isOwner ? group.inviteToken : null,
+        live: await gamesLive(req.groupId!),
+        isOwner: true,
+        inviteToken: group.inviteToken,
       });
     } catch (err: any) {
       console.error("[/api/group/rules GET] error:", err);
@@ -566,71 +698,101 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // PUT /api/group/rules — update the active group's rules. Owner only. Body is
   // a (partial) GroupRules; it's merged onto the current rules and clamped to
-  // sane bounds by resolveGroupRules before saving. The two legacy columns
-  // (buyIn, lmsAllOutRule) are kept in sync so the admin "Groups" screen and
-  // the LMS processor (which still reads lmsAllOutRule) stay consistent.
+  // sane bounds by resolveGroupRules before saving. A game's rules can only be
+  // changed before that game has started (see gamesLive), and only games the
+  // group actually plays can be changed.
   app.put("/api/group/rules", requireGroup, async (req, res) => {
     try {
       if (!(await isActiveGroupOwner(req))) {
         return res.status(403).json({ error: "Only the group admin can change the rules" });
       }
       const { db } = await import("./db");
-      const { groups, resolveGroupRules, LMS_ALL_OUT_RULES } = await import("@shared/schema");
+      const { groups, groupRuleChanges } = await import("@shared/schema");
       const { eq } = await import("drizzle-orm");
-      const { resolveGroupRulesForGroup } = await import("./groupRules");
       const [group] = await db
-        .select({ rules: groups.rules, buyIn: groups.buyIn, lmsAllOutRule: groups.lmsAllOutRule })
+        .select({ rules: groups.rules, enabledGames: groups.enabledGames })
         .from(groups)
         .where(eq(groups.id, req.groupId!));
       if (!group) return res.status(404).json({ error: "No such group" });
 
-      const current = resolveGroupRulesForGroup(group);
-      const body = (req.body ?? {}) as Partial<typeof current>;
-      // Merge incoming values onto the current rules, then clamp/normalise.
-      const merged = resolveGroupRules({
-        lawro: { ...current.lawro, ...(body.lawro ?? {}) },
-        lms: { ...current.lms, ...(body.lms ?? {}) },
+      const current = resolveGroupRules(group.rules);
+      const body = (req.body ?? {}) as Partial<GroupRules>;
+      const enabled = (group.enabledGames as string[] | null) ?? [];
+      // Merge incoming values onto the current rules, then clamp/normalise. A
+      // game the group doesn't play keeps its current rules.
+      const merged: GroupRules = resolveGroupRules({
+        lawro: enabled.includes("predictions") ? { ...current.lawro, ...(body.lawro ?? {}) } : current.lawro,
+        lms: enabled.includes("lms") ? { ...current.lms, ...(body.lms ?? {}) } : current.lms,
       });
-      // Keep the legacy columns in sync. allOutPolicy may now be one of the
-      // richer values (co_winners/no_winner) that the legacy column can't hold;
-      // only mirror it back when it's still a value the column understands,
-      // otherwise leave the column as-is (the blob is authoritative on read).
-      const columnUpdates: { buyIn: number; lmsAllOutRule?: string } = { buyIn: merged.lms.buyIn };
-      if ((LMS_ALL_OUT_RULES as readonly string[]).includes(merged.lms.allOutPolicy)) {
-        columnUpdates.lmsAllOutRule = merged.lms.allOutPolicy;
-      }
-      await db
-        .update(groups)
-        .set({ rules: merged, ...columnUpdates })
-        .where(eq(groups.id, req.groupId!));
 
-      // Log any change so it drives everyone's "the rules changed" pop-up and
-      // keeps earlier Lawro gameweeks on the rules they were played under.
-      const { describeRuleChanges } = await import("./groupRules");
-      const items = describeRuleChanges(current, merged);
-      if (items.length > 0) {
-        const { groupRuleChanges } = await import("@shared/schema");
-        const { nextUnstartedGameweek } = await import("./lmsAutoStart");
-        const lawroChanged = JSON.stringify(merged.lawro) !== JSON.stringify(current.lawro);
-        // A Lawro change applies from the first gameweek still open under the
-        // new deadline; with none left this season it starts from a high
-        // gameweek (99), so the whole current season keeps its old rules.
-        const lawroFrom = lawroChanged
-          ? await nextUnstartedGameweek(merged.lawro.deadlineMinutesBeforeKickoff)
-          : null;
-        const lawroSeason = lawroChanged
-          ? lawroFrom?.season ?? (await storage.getAllMatches()).find((m) => m.season)?.season ?? null
-          : null;
-        await db.insert(groupRuleChanges).values({
-          groupId: req.groupId!,
-          changedByUserId: req.userId ?? null,
-          before: current,
-          after: merged,
-          changes: items,
-          lawroEffectiveSeason: lawroChanged ? lawroSeason : null,
-          lawroEffectiveGameweek: lawroChanged ? lawroFrom?.gameweek ?? 99 : null,
+      const live = await gamesLive(req.groupId!);
+      const changed = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+      if (live.lms && changed(merged.lms, current.lms)) {
+        return res.status(409).json({
+          error: "This Last Man Standing competition has already started, so its rules can't be changed until the next one",
         });
       }
+      const lawroChanged = changed(merged.lawro, current.lawro);
+      // A new Lawro deadline applies from the next open gameweek, so it mustn't
+      // put that gameweek's deadline in the past (snapping it shut).
+      if (
+        lawroChanged &&
+        live.lawroEffectiveFrom &&
+        merged.lawro.deadlineMinutesBeforeKickoff !== current.lawro.deadlineMinutesBeforeKickoff
+      ) {
+        const firstKickoff = await storage.getGameweekDeadline(live.lawroEffectiveFrom.gameweek);
+        const offsetMs = merged.lawro.deadlineMinutesBeforeKickoff * 60 * 1000;
+        if (firstKickoff && Date.now() >= firstKickoff.getTime() - offsetMs) {
+          return res.status(409).json({
+            error: `That deadline has already passed for gameweek ${live.lawroEffectiveFrom.gameweek}, so it would close the gameweek early. Pick a shorter one.`,
+          });
+        }
+      }
+
+      const items = describeRuleChanges(current, merged);
+      if (items.length === 0) return res.json({ ok: true, rules: merged });
+
+      await db.update(groups).set({ rules: merged }).where(eq(groups.id, req.groupId!));
+
+      // Log the change: it drives everyone's "the rules changed" pop-up and
+      // keeps earlier Lawro gameweeks on the rules they were played under.
+      // With no open gameweek left this season, the change starts next season.
+      const lawroFrom = live.lawroEffectiveFrom;
+      const lawroSeason =
+        lawroFrom?.season ?? (await storage.getAllMatches()).find((m) => m.season)?.season ?? null;
+      await db.insert(groupRuleChanges).values({
+        groupId: req.groupId!,
+        changedByUserId: req.userId ?? null,
+        before: current,
+        after: merged,
+        changes: items,
+        lawroEffectiveSeason: lawroChanged ? lawroSeason : null,
+        lawroEffectiveGameweek: lawroChanged ? (lawroFrom?.gameweek ?? 99) : null,
+      });
+
+      // The group's next competition is usually already open (it auto-starts),
+      // but it hasn't begun — otherwise the live check above would have refused
+      // the change. Keep its stored buy-in in step with the new rule.
+      if (merged.lms.buyIn !== current.lms.buyIn) {
+        const competition = await storage.getCurrentLmsCompetition(req.groupId!);
+        if (competition) {
+          await storage.updateLmsCompetition(competition.id, {
+            prizeAmount: merged.lms.buyIn,
+            stakeGbp: merged.lms.buyIn,
+          });
+        }
+      }
+
+      // The LMS deadline gate caches every group's deadline offset.
+      (await import("./lmsWheel")).invalidateLmsDeadlineOffsets();
+
+      // /admin/audit → Settings: who changed which rule, from what to what.
+      const { logAuditEvent } = await import("./groupAuth");
+      await logAuditEvent(req, {
+        type: "settings_rules",
+        userId: req.userId ?? null,
+        details: { changes: items.map((i) => ({ game: i.game, label: i.label, from: i.from, to: i.to })) },
+      });
 
       res.json({ ok: true, rules: merged });
     } catch (err: any) {
@@ -648,14 +810,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const upToId = Number(req.body?.upToId);
       if (!Number.isInteger(upToId) || upToId < 0) return res.status(400).json({ error: "Invalid upToId" });
       const { db } = await import("./db");
-      const { users } = await import("@shared/schema");
-      const { and, eq, lt } = await import("drizzle-orm");
-      const { latestRuleChangeId } = await import("./groupRules");
+      const { users, groupRuleChanges, activityLogs } = await import("@shared/schema");
+      const { and, eq, gt, lte, asc } = await import("drizzle-orm");
       const capped = Math.min(upToId, await latestRuleChangeId(req.groupId!));
-      await db
-        .update(users)
-        .set({ lastSeenRuleChangeId: capped })
-        .where(and(eq(users.id, req.userId!), eq(users.groupId, req.groupId!), lt(users.lastSeenRuleChangeId, capped)));
+      await db.transaction(async (tx) => {
+        // Serialize acknowledgements for this player so retries and two open
+        // tabs cannot log the same changes twice. Save the marker and audit row
+        // together, so a failed write leaves the changes available to retry.
+        const [user] = await tx
+          .select({ lastSeenId: users.lastSeenRuleChangeId })
+          .from(users)
+          .where(and(eq(users.id, req.userId!), eq(users.groupId, req.groupId!)))
+          .for("update");
+        if (!user || capped <= user.lastSeenId) return;
+
+        const rows = await tx
+          .select()
+          .from(groupRuleChanges)
+          .where(and(
+            eq(groupRuleChanges.groupId, req.groupId!),
+            gt(groupRuleChanges.id, user.lastSeenId),
+            lte(groupRuleChanges.id, capped),
+          ))
+          .orderBy(asc(groupRuleChanges.id));
+        // The pop-up excludes a player's own edits; those aren't acknowledgements.
+        const acknowledged = rows.filter((r) => r.changedByUserId !== req.userId);
+        await tx.update(users).set({ lastSeenRuleChangeId: capped }).where(eq(users.id, req.userId!));
+        if (acknowledged.length === 0) return;
+
+        const ipAddress = getRealIP(req);
+        const location = getLocationFromIP(ipAddress);
+        await tx.insert(activityLogs).values({
+          type: "rule_change_acknowledged",
+          userId: req.userId!,
+          groupId: req.groupId!,
+          ipAddress,
+          userAgent: req.get("User-Agent") || null,
+          city: location.city,
+          country: location.country,
+          path: req.path,
+          details: JSON.stringify({
+            upToId: capped,
+            ruleChangeIds: acknowledged.map((r) => r.id),
+            changes: acknowledged.flatMap((r) => r.changes),
+          }),
+        });
+      });
       res.json({ ok: true });
     } catch (err: any) {
       console.error("[/api/group/rule-changes/seen POST] error:", err);
@@ -663,7 +863,50 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // ---- Group admin: player management (owner only, on /group-settings) ----
+  // ---- Group admin: players + invite link ----
+  //
+  // The group's admin (owner) manages their own group's players from
+  // /group-settings: see who's in, take someone out of / put them back into the
+  // LMS competition that's about to start (e.g. sitting one out), reset a lost
+  // login code, remove a player added by mistake, rename (self-service groups
+  // only) and reset the invite link. Every endpoint is owner-only and only
+  // touches rows in the admin's active group.
+
+  // The player row `id` if it belongs to the caller's active group.
+  async function playerInActiveGroup(req: any, id: number) {
+    if (!Number.isInteger(id)) return undefined;
+    const player = await storage.getUser(id);
+    return player && player.groupId === req.groupId ? player : undefined;
+  }
+
+  // The group's current LMS competition and whether players can still be moved
+  // in or out of it: only until its first deadline, so nobody joins or leaves
+  // a competition that's already under way.
+
+  // Whether a player has any game history in this group. Players with history
+  // can't be removed (it would rewrite past leaderboards and LMS results).
+  async function playerHasHistory(userId: number): Promise<boolean> {
+    const { db } = await import("./db");
+    const { predictions, lmsParticipants, lmsSelections, lmsCompetitions } =
+      await import("@shared/schema");
+    const { and, eq } = await import("drizzle-orm");
+    const [pred] = await db.select({ id: predictions.id }).from(predictions).where(eq(predictions.userId, userId)).limit(1);
+    if (pred) return true;
+    const [lmsPick] = await db
+      .select({ id: lmsSelections.id })
+      .from(lmsSelections)
+      .innerJoin(lmsParticipants, eq(lmsSelections.participantId, lmsParticipants.id))
+      .where(eq(lmsParticipants.userId, userId))
+      .limit(1);
+    if (lmsPick) return true;
+    const [pastComp] = await db
+      .select({ id: lmsParticipants.id })
+      .from(lmsParticipants)
+      .innerJoin(lmsCompetitions, eq(lmsParticipants.competitionId, lmsCompetitions.id))
+      .where(and(eq(lmsParticipants.userId, userId), eq(lmsCompetitions.status, "completed")))
+      .limit(1);
+    return !!pastComp;
+  }
 
   // GET /api/group/players — the active group's players for the admin.
   app.get("/api/group/players", requireGroup, async (req, res) => {
@@ -688,6 +931,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (competition) {
         for (const p of await storage.getLmsParticipantsByCompetition(competition.id)) inLms.add(p.userId);
       }
+      // Joined too late for the running competition: in the next one.
+      const lmsNext = plays("lms") ? await waitingIds(req.groupId!) : new Set<number>();
       const players = await Promise.all(
         rows.map(async (r) => {
           const isOwner = r.id === group?.ownerUserId;
@@ -696,14 +941,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
             username: r.username,
             isOwner,
             inLms: inLms.has(r.id),
+            lmsNext: !inLms.has(r.id) && lmsNext.has(r.id),
             canRemove: !isOwner && !(await playerHasHistory(r.id)),
           };
         }),
       );
       res.json({
         players,
-        // Names identify people in the original groups (the shared login across
-        // groups), so only self-service groups can rename.
+        // Names identify people in the original groups (the shared login
+        // across groups), so only self-service groups can rename.
         canRename: !!group?.inviteToken,
         lms: competition
           ? { name: competition.name, startGameweek: competition.startGameweek, open }
@@ -747,6 +993,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         );
       if (clash) return res.status(409).json({ error: `There's already a "${username}" in this group` });
       await db.update(users).set({ username }).where(eq(users.id, player.id));
+      const { logAuditEvent } = await import("./groupAuth");
+      await logAuditEvent(req, {
+        type: "player_renamed",
+        userId: player.id,
+        details: { from: player.username, to: username },
+      });
       res.json({ ok: true });
     } catch (err: any) {
       console.error("[/api/group/players PATCH] error:", err);
@@ -829,6 +1081,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       const participants = await storage.getLmsParticipantsByCompetition(competition.id);
       const mine = participants.filter((p) => p.userId === player.id);
+      await stopWaiting([player.id]);
       if (inLms && mine.length === 0) {
         await storage.createLmsParticipant({
           competitionId: competition.id,
@@ -885,6 +1138,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // activity_logs.user_id is a real FK → null it rather than block delete.
       await db.update(activityLogs).set({ userId: null }).where(eq(activityLogs.userId, player.id));
       await db.delete(users).where(eq(users.id, player.id));
+      // The row is gone, so record the name (the audit row is the admin's own).
+      const { logAuditEvent } = await import("./groupAuth");
+      await logAuditEvent(req, { type: "player_removed", userId: req.userId ?? null, details: { name: player.username } });
       res.json({ ok: true });
     } catch (err: any) {
       console.error("[/api/group/players DELETE] error:", err);
@@ -911,6 +1167,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .where(and(eq(groups.id, req.groupId!), isNotNull(groups.inviteToken)))
         .returning({ id: groups.id });
       if (updated.length === 0) return res.status(409).json({ error: "This group has no invite link" });
+      const { logAuditEvent } = await import("./groupAuth");
+      await logAuditEvent(req, { type: "invite_reset", userId: req.userId ?? null, details: {} });
       res.json({ ok: true, inviteToken });
     } catch (err: any) {
       console.error("[/api/group/invite/reset] error:", err);
@@ -1008,9 +1266,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/push/lead", requireGroup, async (req, res) => {
     try {
       const leads = normalizeLeads(req.body?.leads);
-      const { setLeadsForUser } = await import("./push");
+      const { setLeadsForUser, getPreferencesForUser } = await import("./push");
+      const before = await getPreferencesForUser(req.userId!).catch(() => null);
       const changed = await setLeadsForUser(req.userId!, leads);
-      await logPushEvent(req, "push_lead_changed", { leads });
+      await logPushEvent(req, "push_lead_changed", { leads, from: before?.leads ?? null });
       res.json({ ok: true, leads, changed });
     } catch (err: any) {
       console.error("[/api/push/lead] error:", err);
@@ -1297,6 +1556,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // GET /api/group/me — returns the logged-in person + their active group +
   // the groups they can switch between, or 401.
+  // GET /api/group/picks-due — which games still need a pick from the signed-in
+  // person this gameweek (any of their groups); drives the bottom nav's dots.
+  app.get("/api/group/picks-due", async (req, res) => {
+    if (!req.groupId || !req.userId) return res.status(401).json({ error: "Not logged in" });
+    try {
+      const { picksDueFor } = await import("./navDue");
+      res.json(await picksDueFor(req.userId));
+    } catch (err) {
+      console.error("picks-due failed", err);
+      res.json({ lms: false, predictions: false, groups: {} });
+    }
+  });
+
   app.get("/api/group/me", async (req, res) => {
     if (!req.groupId || !req.userId) return res.status(401).json({ error: "Not logged in" });
     const { db } = await import("./db");
@@ -1314,6 +1586,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
     res.json(session.payload);
   });
+
+  // Preserve bookmarked admin URLs while keeping one canonical route per page.
+  for (const [from, to] of [["/admin", "/admin/visitors"], ["/audit", "/admin/audit"], ["/activity", "/admin/activity"]]) {
+    app.get(from, (_req, res) => res.redirect(308, to));
+  }
 
   // Activity logging middleware for all page visits
   app.use(async (req, res, next) => {
@@ -1637,45 +1914,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
-  // Keep other players' Lawro picks secret until they're revealed. Shared by
-  // every endpoint that returns predictions, so none of them can be used to
-  // read a groupmate's scoreline before the deadline.
-  //
-  // Keep other players' scorelines secret until each gameweek's deadline (its
-  // first kickoff) passes — otherwise they could be read straight off the
-  // network response. We still reveal *that* a pick exists (so the grid can
-  // show who has and hasn't submitted), just not the score: a pre-deadline
-  // pick from another player is redacted to { hidden: true } with no
-  // homeScore/awayScore. Your own picks are always returned in full; everyone's
-  // scorelines appear once the deadline is up. (Finished-match points are
-  // unaffected — a match only finishes well after its deadline.)
-  async function redactUnrevealedPredictions(
-    predictions: any[],
-    _groupId: number | undefined,
-    viewerId: number | undefined,
-  ): Promise<any[]> {
-    const { londonStringToUtcMs } = await import("@shared/time");
-    const allMatches = await storage.getAllMatchesWithTeams();
-    const deadlineByGw = new Map<number, number>();
-    for (const m of allMatches) {
-      if (m.gameweek == null) continue;
-      const ko = londonStringToUtcMs(m.matchTime);
-      if (Number.isNaN(ko)) continue;
-      const cur = deadlineByGw.get(m.gameweek);
-      if (cur == null || ko < cur) deadlineByGw.set(m.gameweek, ko);
-    }
-    const now = Date.now();
-    return predictions.map((p) => {
-      if (p.userId === viewerId) return p;
-      const gw = p.match?.gameweek;
-      const dl = gw != null ? deadlineByGw.get(gw) : undefined;
-      if (dl != null && now >= dl) return p;
-      // Redacted: keep who/which match (for the submitted/not view), drop the
-      // scoreline and any derived fields.
-      return { id: p.id, userId: p.userId, matchId: p.matchId, hidden: true, match: p.match } as any;
-    });
-  }
-
   // GET /api/users/:id/predictions - Get a user's predictions with match details
   app.get("/api/users/:id/predictions", async (req, res) => {
     try {
@@ -1774,19 +2012,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Update screen resolution from client
   app.post("/api/track/resolution", updateScreenResolution);
   
-  // POST /api/scraper/run - Manually trigger score scraping from Flashscore
-  app.post("/api/scraper/run", async (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    try {
-      console.log('Manual scraper trigger requested');
-      await runScraper(storage);
-      res.json({ success: true, message: "Scraper completed successfully" });
-    } catch (error) {
-      console.error('Manual scraper error:', error);
-      res.status(500).json({ error: "Scraper failed", details: error instanceof Error ? error.message : 'Unknown error' });
-    }
-  });
-  
   // POST /api/teams - Create a new team
   app.post("/api/teams", async (req, res) => {
     if (!requireAdmin(req, res)) return;
@@ -1836,7 +2061,75 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
-  // POST /api/predictions - Create a new prediction
+  // PUT by user/match is idempotent, including clearing a pick. Retrying a
+  // response lost after commit must not create a duplicate or need a row ID.
+  app.put("/api/predictions", async (req, res) => {
+    const requestId = crypto.randomUUID();
+    res.set("X-Request-Id", requestId);
+    const lockedError = new Error("Predictions are locked - the gameweek deadline has passed");
+    try {
+      const score = z.number().int().min(0).max(9).nullable();
+      const input = z.object({
+        userId: z.number().int().positive(), matchId: z.number().int().positive(),
+        homeScore: score, awayScore: score,
+      }).strict().refine(v => (v.homeScore === null) === (v.awayScore === null)).parse(req.body);
+      if (input.userId !== req.userId) {
+        return res.status(403).json({ error: "You can only edit your own predictions" });
+      }
+      const { withDbRetry } = await import("./db");
+      if (req.userId == null || req.groupId == null ||
+          !(await withDbRetry(() => userGameEnabled(req.userId!, req.groupId!, "predictions")))) {
+        return res.status(403).json({ error: "The Prediction League is not enabled for your current group" });
+      }
+      const match = await withDbRetry(() => storage.getMatch(input.matchId));
+      if (!match) return res.status(404).json({ error: "Match not found" });
+      // Resolve read-only metadata before taking the user lock. Pool queries
+      // from inside that lock can deadlock when other requests occupy the
+      // remaining connections waiting for the same user row.
+      const window = await withDbRetry(async () => {
+        const rules = (await getLawroRulesResolver(req.groupId))(match.season, match.gameweek);
+        const deadline = match.gameweek == null ? null : await storage.getGameweekDeadline(match.gameweek);
+        const { londonStringToUtcMs } = await import("@shared/time");
+        return {
+          lockAt: deadline == null ? Infinity : deadline.getTime() - rules.deadlineMinutesBeforeKickoff * 60000,
+          kickoff: londonStringToUtcMs(match.matchTime),
+          lateEntry: rules.missedPickPolicy === "open_until_kickoff",
+        };
+      });
+      const result = await withDbRetry(() => storage.savePrediction(input, async existing => {
+        // Already committed retries are harmless even if the deadline passed
+        // between the commit and receipt of its response.
+        if ((!existing && input.homeScore === null) || (existing &&
+            existing.homeScore === input.homeScore && existing.awayScore === input.awayScore)) {
+          return { isLatePick: existing?.isLatePick ?? false };
+        }
+        const now = Date.now();
+        const locked = now >= window.lockAt;
+        if (locked && ((existing && !existing.isLatePick) || !window.lateEntry || !(now < window.kickoff))) {
+          throw lockedError;
+        }
+        return { isLatePick: existing?.isLatePick ?? locked };
+      }));
+      if (result.changed) {
+        const { logAuditEvent } = await import("./groupAuth");
+        await logAuditEvent(req, {
+          type: input.homeScore === null ? "prediction_delete" : result.previous ? "prediction_change" : "prediction_set",
+          userId: input.userId,
+          details: { matchId: input.matchId, ...(input.homeScore === null ? {} : {
+            homeScore: input.homeScore, awayScore: input.awayScore,
+          }) },
+        });
+      }
+      res.json({ prediction: result.prediction });
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ error: "Enter a score from 0 to 9 for each team, or clear both scores" });
+      if (error === lockedError) return res.status(403).json({ error: lockedError.message });
+      console.error("[lawro] save failed", { requestId, userId: req.userId, matchId: req.body?.matchId, error });
+      res.status(500).json({ error: "Could not save your prediction. Please retry." });
+    }
+  });
+
+  // POST /api/predictions - Create a new prediction (older clients)
   app.post("/api/predictions", async (req, res) => {
     try {
       const predictionData = insertPredictionSchema.parse(req.body);
@@ -1880,14 +2173,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Match not found" });
       }
 
-      // The whole gameweek locks at its deadline (the first kickoff). After that
-      // point missed picks are auto-randomised, so no manual edits are allowed.
-      if (await gameweekLocked(match.gameweek, req.groupId)) {
-        return res.status(403).json({ error: "Predictions are locked - the gameweek deadline has passed" });
+      // The whole gameweek locks at its deadline (the first kickoff). The one
+      // exception is the "open_until_kickoff" missed-deadline rule: a player
+      // who missed the deadline may still add a pick for a match that hasn't
+      // kicked off yet. Such a pick is flagged late (see PATCH/DELETE).
+      let isLatePick = false;
+      if (await gameweekLocked(match.gameweek, req.groupId, match.season)) {
+        if (!(await lateEntryOpen(match, req.groupId))) {
+          return res.status(403).json({ error: "Predictions are locked - the gameweek deadline has passed" });
+        }
+        isLatePick = true;
       }
 
-      // Manual picks are never flagged auto, regardless of what the client sent.
-      const prediction = await storage.createPrediction({ ...predictionData, isAutoPick: false });
+      // Manual picks are never flagged auto, and the late flag is decided here —
+      // never taken from what the client sent.
+      const prediction = await storage.createPrediction({ ...predictionData, isAutoPick: false, isLatePick, isJoker: false });
       const { logAuditEvent } = await import("./groupAuth");
       await logAuditEvent(req, {
         type: "prediction_set",
@@ -1945,7 +2245,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Match not found" });
       }
 
-      if (await gameweekLocked(match.gameweek, req.groupId)) {
+      // A late pick (made after the deadline under "open_until_kickoff") can be
+      // adjusted until its match kicks off; any other pick locks at the deadline.
+      if (
+        (await gameweekLocked(match.gameweek, req.groupId, match.season)) &&
+        !(existing.isLatePick && (await lateEntryOpen(match, req.groupId)))
+      ) {
         return res.status(403).json({ error: "Predictions are locked - the gameweek deadline has passed" });
       }
 
@@ -1959,6 +2264,81 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(updated);
     } catch (error) {
       res.status(500).json({ error: "Failed to update prediction" });
+    }
+  });
+
+  // PUT /api/predictions/:id/joker - Make this prediction the caller's Joker
+  // for its gameweek ({ joker: true }), or take the Joker off it ({ joker:
+  // false }). Only under the Lawro Joker rule. The Joker can only be moved while
+  // both the pick it's leaving and the pick it's going to could still be edited
+  // (i.e. before the deadline, or late picks before their kick-off), so it can't
+  // be shifted onto a match once the result is being played out.
+  app.put("/api/predictions/:id/joker", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const joker = req.body?.joker;
+      if (typeof joker !== "boolean") {
+        return res.status(400).json({ error: "joker must be true or false" });
+      }
+
+      const existing = await storage.getPrediction(id);
+      if (!existing) {
+        return res.status(404).json({ error: "Prediction not found" });
+      }
+      if (existing.userId !== req.userId) {
+        return res.status(403).json({ error: "You can only edit your own predictions" });
+      }
+      if (
+        req.userId == null ||
+        req.groupId == null ||
+        !(await userGameEnabled(req.userId, req.groupId, "predictions"))
+      ) {
+        return res
+          .status(403)
+          .json({ error: "The Prediction League is not enabled for your current group" });
+      }
+
+      const match = await storage.getMatch(existing.matchId);
+      if (!match || match.gameweek == null) {
+        return res.status(404).json({ error: "Match not found" });
+      }
+      const rules = (await getLawroRulesResolver(req.groupId))(match.season, match.gameweek);
+      if (!rules.jokerEnabled) {
+        return res.status(400).json({ error: "The Joker isn't on for this gameweek" });
+      }
+
+      const locked = await gameweekLocked(match.gameweek, req.groupId, match.season);
+      const editable = async (p: { isLatePick: boolean }, m: typeof match) =>
+        !locked || (p.isLatePick && (await lateEntryOpen(m, req.groupId)));
+      if (!(await editable(existing, match))) {
+        return res.status(403).json({ error: "That match is locked, so your Joker can't change" });
+      }
+
+      // The caller's other picks this gameweek: the Joker can't leave one that's
+      // already locked.
+      const gwMatches = (await storage.getMatchesByGameweek(match.gameweek)).filter(
+        (m) => (m.season ?? null) === (match.season ?? null),
+      );
+      const gwMatchIds = gwMatches.map((m) => m.id);
+      if (joker) {
+        const mine = await storage.getUserPredictions(req.userId);
+        const current = mine.find((p) => p.isJoker && p.id !== id && gwMatchIds.includes(p.matchId));
+        const currentMatch = current ? gwMatches.find((m) => m.id === current.matchId) : undefined;
+        if (current && currentMatch && !(await editable(current, currentMatch))) {
+          return res.status(403).json({ error: "Your Joker is already locked in for this gameweek" });
+        }
+      }
+
+      await storage.setPredictionJoker(req.userId, id, joker, gwMatchIds);
+      const { logAuditEvent } = await import("./groupAuth");
+      await logAuditEvent(req, {
+        type: "prediction_joker",
+        userId: existing.userId,
+        details: { matchId: existing.matchId, joker },
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to set the Joker" });
     }
   });
 
@@ -1994,7 +2374,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Match not found" });
       }
 
-      if (await gameweekLocked(match.gameweek, req.groupId)) {
+      // Same rule as PATCH: only a late pick, and only before its match kicks off.
+      if (
+        (await gameweekLocked(match.gameweek, req.groupId, match.season)) &&
+        !(existing.isLatePick && (await lateEntryOpen(match, req.groupId)))
+      ) {
         return res.status(403).json({ error: "Predictions are locked - the gameweek deadline has passed" });
       }
 
@@ -2008,73 +2392,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(204).end();
     } catch (error) {
       res.status(500).json({ error: "Failed to delete prediction" });
-    }
-  });
-
-  // PUT /api/predictions/:id/joker - Make this prediction the caller's Joker
-  // for its gameweek ({ joker: true }), or take the Joker off it ({ joker:
-  // false }). Only under the Lawro Joker rule, and only while the gameweek is
-  // still open (before the deadline), so the Joker can't be shifted onto a
-  // match once the result is being played out.
-  app.put("/api/predictions/:id/joker", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const joker = req.body?.joker;
-      if (typeof joker !== "boolean") {
-        return res.status(400).json({ error: "joker must be true or false" });
-      }
-
-      const existing = await storage.getPrediction(id);
-      if (!existing) {
-        return res.status(404).json({ error: "Prediction not found" });
-      }
-      if (existing.userId !== req.userId) {
-        return res.status(403).json({ error: "You can only edit your own predictions" });
-      }
-      if (
-        req.userId == null ||
-        req.groupId == null ||
-        !(await userGameEnabled(req.userId, req.groupId, "predictions"))
-      ) {
-        return res
-          .status(403)
-          .json({ error: "The Prediction League is not enabled for your current group" });
-      }
-
-      const match = await storage.getMatch(existing.matchId);
-      if (!match || match.gameweek == null) {
-        return res.status(404).json({ error: "Match not found" });
-      }
-      // The Joker is only available when the rule was on for this gameweek.
-      const { getLawroRulesResolver } = await import("./groupRules");
-      const rules = (await getLawroRulesResolver(req.groupId))(match.season, match.gameweek);
-      if (!rules.jokerEnabled) {
-        return res.status(400).json({ error: "The Joker isn't on for this gameweek" });
-      }
-
-      // The whole gameweek locks together at its deadline, so once this match is
-      // locked the Joker can neither move onto it nor off any pick in the week.
-      if (await gameweekLocked(match.gameweek, req.groupId)) {
-        return res.status(403).json({ error: "That match is locked, so your Joker can't change" });
-      }
-
-      // Setting a new Joker clears any the player already has elsewhere in the
-      // gameweek, so pass the gameweek's match ids for the server to scope that.
-      const gwMatches = (await storage.getMatchesByGameweek(match.gameweek)).filter(
-        (m) => (m.season ?? null) === (match.season ?? null),
-      );
-      const gwMatchIds = gwMatches.map((m) => m.id);
-
-      await storage.setPredictionJoker(req.userId, id, joker, gwMatchIds);
-      const { logAuditEvent } = await import("./groupAuth");
-      await logAuditEvent(req, {
-        type: "prediction_joker",
-        userId: existing.userId,
-        details: { matchId: existing.matchId, joker },
-      });
-      res.json({ ok: true });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to set the Joker" });
     }
   });
 
@@ -2117,12 +2434,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // the network response. We still reveal *that* a pick exists (teamId nulled,
       // hidden: true) so the grid can show who's picked. Your own pick is always
       // shown, and every past/locked gameweek is shown for everyone.
-      const currentGameweek = competition.currentGameweek;
-      const currentRules = await getGroupRules(competition.groupId);
-      const currentLocked = await isGameweekLocked(
-        currentGameweek,
-        currentRules.lms.deadlineMinutesBeforeKickoff,
-      );
+      const compRules = await getGroupRules(req.groupId);
+      const redactPick = lmsPickRedactor(compRules.lms.deadlineMinutesBeforeKickoff);
+      // A missed player's random pick stays hidden from everyone, its owner
+      // included, until their randomiser wheel lands (see server/lmsWheel.ts).
+      const { wheelHiddenSelectionIds } = await import("./lmsWheel");
+      const wheelHidden = await wheelHiddenSelectionIds([competition]);
 
       const competitionWithDetails = {
         ...competition,
@@ -2131,16 +2448,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const selections = await storage.getLmsSelectionsByParticipant(participant.id);
           const isMine = participant.userId === req.userId;
           // Transform database field names to camelCase for frontend
-          const transformedSelections = selections.map(selection => {
+          const transformedSelections = await Promise.all(selections.map(selection => {
             const base = {
               ...selection,
               isRandomlyAssigned: selection.isRandomlyAssigned || (selection as any).is_randomly_assigned,
             };
-            if (!currentLocked && !isMine && selection.gameweek === currentGameweek) {
-              return { ...base, teamId: null, hidden: true };
-            }
-            return base;
-          });
+            if (wheelHidden.has(selection.id)) return hideForWheel(base);
+            return redactPick(base, isMine);
+          }));
           return {
             ...participant,
             user,
@@ -2158,17 +2473,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
+  // GET /api/lms/wheel - The randomiser wheels for the caller's group: players
+  // who missed the current gameweek's deadline, each spinning in turn from 3
+  // minutes after it. Returns { spins: [] } when there's nothing to show (no
+  // misses, the wheels have all finished, or the caller doesn't play LMS).
+  app.get("/api/lms/wheel", requireGroup, async (req, res) => {
+    try {
+      const empty = { serverNow: Date.now(), spins: [] };
+      if (!req.userId || !(await userGameEnabled(req.userId, req.groupId!, "lms"))) return res.json(empty);
+      const competition = await storage.getCurrentLmsCompetition(req.groupId);
+      if (!competition) return res.json(empty);
+      const { wheelViewFor } = await import("./lmsWheel");
+      res.json((await wheelViewFor(competition, req.userId)) ?? empty);
+    } catch (error) {
+      console.error("Error fetching LMS wheel:", error);
+      res.status(500).json({ error: "Failed to fetch wheel" });
+    }
+  });
+
+  // POST /api/admin/schedule/refresh - Drop the background jobs' cached
+  // kickoff schedule and LMS deadline offsets, e.g. after editing kickoff
+  // times by hand (scripts/simulateLmsWheel.ts calls it).
+  app.post("/api/admin/schedule/refresh", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { invalidatePlSchedule } = await import("./scheduleGate");
+    const { invalidateLmsDeadlineOffsets } = await import("./lmsWheel");
+    invalidatePlSchedule();
+    invalidateLmsDeadlineOffsets();
+    res.json({ ok: true });
+  });
+
   // GET /api/lms/competitions - Get all competitions (for history view)
   app.get("/api/lms/competitions", async (req, res) => {
     try {
       const competitions = await storage.getAllLmsCompetitions(req.groupId);
+      const allRules = await getGroupRules(req.groupId);
+      const redactPick = lmsPickRedactor(allRules.lms.deadlineMinutesBeforeKickoff);
+      const { wheelHiddenSelectionIds } = await import("./lmsWheel");
+      const wheelHidden = await wheelHiddenSelectionIds(competitions);
       const competitionsWithDetails = await Promise.all(competitions.map(async (competition) => {
         const participants = await storage.getLmsParticipantsByCompetition(competition.id);
         return {
           ...competition,
           participants: await Promise.all(participants.map(async (participant) => {
             const user = await storage.getUser(participant.userId);
-            const selections = await storage.getLmsSelectionsByParticipant(participant.id);
+            const isMine = participant.userId === req.userId;
+            const selections = await Promise.all(
+              (await storage.getLmsSelectionsByParticipant(participant.id)).map((s) =>
+                wheelHidden.has(s.id) ? hideForWheel(s) : redactPick(s, isMine),
+              ),
+            );
             return {
               ...participant,
               user,
@@ -2239,10 +2593,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let usedTeamIds = new Set<number>();
       if (userParticipant) {
         const userSelections = await storage.getLmsSelectionsByParticipant(userParticipant.id);
-        usedTeamIds = new Set(userSelections.map(s => s.teamId));
+        // Missed-pick rows (teamId null) don't use up a team.
+        usedTeamIds = new Set(
+          userSelections.map(s => s.teamId).filter((id): id is number => id != null),
+        );
       }
-      
-      // Add match info and mark teams as used/available
+
+      // A team a player has already used is used up for good — reusing teams is
+      // never allowed.
       const availableTeams = teams.map(team => {
         const match = matches.find((m: any) => m.homeTeamId === team.id || m.awayTeamId === team.id);
         return {
@@ -2263,19 +2621,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   
   // POST /api/lms/select-team - Make a team selection for a specific participant and gameweek
+  // LMS pick payloads must be whole numbers. The checks below compare them to
+  // database values with ===, so a string ("1" for gameweek 1) used to slip
+  // past the deadline lock and the no-reuse rule.
+  const lmsPickBody = z.object({
+    teamId: z.number().int().positive(),
+    participantId: z.number().int().positive(),
+    gameweek: z.number().int().min(1).max(60),
+  });
+
   app.post("/api/lms/select-team", async (req, res) => {
     try {
-      const { teamId, participantId, gameweek } = req.body;
+      const parsedPick = lmsPickBody.safeParse(req.body);
+      if (!parsedPick.success) {
+        return res.status(400).json({ error: "teamId, participantId and gameweek must be whole numbers" });
+      }
+      const { teamId, participantId, gameweek } = parsedPick.data;
 
       const competition = await storage.getCurrentLmsCompetition(req.groupId);
       if (!competition) {
         return res.status(404).json({ error: "No active competition found" });
       }
 
-      const selectRules = await getGroupRules(competition.groupId);
-
-      // Check if gameweek is locked (its deadline — the first match's kickoff,
-      // brought forward by the group's configured offset — has passed).
+      // Check if gameweek is locked (deadline has passed), honouring the
+      // group's LMS deadline offset.
+      const selectRules = await getGroupRules(req.groupId);
       const isLocked = await isGameweekLocked(gameweek, selectRules.lms.deadlineMinutesBeforeKickoff);
       if (isLocked) {
         return res.status(400).json({ error: "Selection period has ended - the first match of this gameweek has already started" });
@@ -2289,7 +2659,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // A player can only edit their own selections. The logged-in user (from
       // the session cookie) must own this participant row.
-      if (participant.userId !== req.userId) {
+      if (participant.userId !== req.userId || participant.competitionId !== competition.id) {
         return res.status(403).json({ error: "You can only edit your own selections" });
       }
 
@@ -2297,7 +2667,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Participant is eliminated from competition" });
       }
       
-      // Check if team was already used by this participant (teams can never be reused)
+      // A team can only be used once — reusing a team across gameweeks is never
+      // allowed.
       const participantSelections = await storage.getLmsSelectionsByParticipant(participantId);
       const teamAlreadyUsed = participantSelections.some(s => s.teamId === teamId);
       if (teamAlreadyUsed) {
@@ -2420,14 +2791,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // DELETE /api/lms/remove-selection - Remove a team selection for a specific participant and gameweek
   app.post("/api/lms/remove-selection", async (req, res) => {
     try {
-      const { participantId, gameweek } = req.body;
+      const parsedRemove = lmsPickBody.omit({ teamId: true }).safeParse(req.body);
+      if (!parsedRemove.success) {
+        return res.status(400).json({ error: "participantId and gameweek must be whole numbers" });
+      }
+      const { participantId, gameweek } = parsedRemove.data;
 
       const competition = await storage.getCurrentLmsCompetition(req.groupId);
       if (!competition) {
         return res.status(404).json({ error: "No active competition found" });
       }
 
-      const removeRules = await getGroupRules(competition.groupId);
+      const removeRules = await getGroupRules(req.groupId);
       const isLocked = await isGameweekLocked(gameweek, removeRules.lms.deadlineMinutesBeforeKickoff);
       if (isLocked) {
         return res.status(400).json({ error: "Selection period has ended" });
@@ -2438,7 +2813,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!participant) {
         return res.status(404).json({ error: "Participant not found" });
       }
-      if (participant.userId !== req.userId) {
+      if (participant.userId !== req.userId || participant.competitionId !== competition.id) {
         return res.status(403).json({ error: "You can only edit your own selections" });
       }
 
@@ -2481,18 +2856,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // GET /api/admin/lms-selection-logs - Admin endpoint to view team selection logs with human-readable names
-  app.get("/api/admin/lms-selection-logs", async (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    try {
-      const logs = await storage.getLmsSelectionLogs();
-      res.json(logs);
-    } catch (error) {
-      console.error("Error fetching LMS selection logs:", error);
-      res.status(500).json({ error: "Failed to fetch selection logs" });
-    }
-  });
-
   // GET /api/admin/activity-logs - Admin endpoint to view all site activity logs
   app.get("/api/admin/activity-logs", async (req, res) => {
     if (!requireAdmin(req, res)) return;
@@ -2515,14 +2878,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Invalid gameweek number" });
       }
 
-      // The caller's group rules carry the LMS lock offset (minutes before the
-      // gameweek's first kickoff that selections lock; default 0).
+      // The caller's group LMS deadline offset (minutes before first kickoff).
       const statusRules = await getGroupRules(req.groupId);
       const lockMinutes = statusRules.lms.deadlineMinutesBeforeKickoff;
       const isLocked = await isGameweekLocked(gameweek, lockMinutes);
 
-      // If the gameweek just became locked, apply the caller's group missed-pick
-      // rule to its competition (not the newest one across all groups).
+      // If the gameweek just became locked, process missed picks for the
+      // caller's group competition (not the newest one across all groups).
       if (isLocked) {
         const competition = await storage.getCurrentLmsCompetition(req.groupId);
         if (competition) {
@@ -2542,21 +2904,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ error: "Failed to check gameweek status" });
     }
   });
-
-  // Set up automatic score scraping every 5 minutes during match days
-  // Runs Friday-Monday between 12:00 and 23:00 (covers typical match times)
-  // Temporarily disabled to prevent corrupted score data
-  // cron.schedule('*/5 12-23 * * 5-1', async () => {
-  //   console.log('Running automatic score scraper...');
-  //   try {
-  //     await runScraper(storage);
-  //   } catch (error) {
-  //     console.error('Automatic scraper error:', error);
-  //   }
-  // });
-  
-  console.log('Score scraper disabled - manual updates only');
-
 
   // Import LMS processor
   const { lmsProcessor } = await import('./lmsProcessor');
@@ -2607,7 +2954,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   
   // POST /api/track/page-visit - Track client-side page visits
-  app.post("/api/track/page-visit", async (req, res) => {
+  app.post("/api/track/page-visit", trackEventLimiter, async (req, res) => {
     try {
       const { path, timestamp, userAgent, referrer, trigger, visible } = req.body;
 
@@ -2640,6 +2987,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         path: path,
         details: JSON.stringify({
           method: 'CLIENT_NAVIGATION',
+          vid: readVisitorId(req),
           referrer: referrer,
           timestamp: timestamp,
           trigger: trigger ?? 'navigation',
@@ -2660,7 +3008,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // POST /api/track — lightweight visit-tracking from the client. Used to
   // record tab/section changes inside SPAs that don't otherwise trigger a
   // page navigation (e.g. the Lawro sub-tabs). Body: { path, subPath?, label? }.
-  app.post("/api/track", async (req, res) => {
+  app.post("/api/track", trackEventLimiter, async (req, res) => {
     try {
       const { storage } = await import("./storage");
       const { getRealIP, getLocationFromIP } = await import("./geolocation");
@@ -2677,13 +3025,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
         city: location.city,
         country: location.country,
         path,
-        details: JSON.stringify({ subPath, label }),
+        details: JSON.stringify({ subPath, label, vid: readVisitorId(req) }),
         groupId: req.groupId ?? null,
       } as any);
       res.json({ ok: true });
     } catch (err: any) {
       // Tracking failures must not block the user flow.
       console.error("[/api/track] error:", err);
+      res.json({ ok: false });
+    }
+  });
+
+  // POST /api/track/event — a fine-grained client event for the activity
+  // timeline and audit: app backgrounded/foregrounded, LMS wheel watched,
+  // Fixtures cell highlighted, Tendencies chart used, push opened/dismissed,
+  // device setting changed. Body { event, path?, detail? }; the event name is
+  // whitelisted (shared/activityEvents.ts) and detail is flattened/truncated.
+  app.post("/api/track/event", trackEventLimiter, async (req, res) => {
+    const event = req.body?.event;
+    if (!isClientEvent(event)) return res.status(400).json({ ok: false, error: "Unknown event" });
+    try {
+      const realIP = getRealIP(req);
+      const location = getLocationFromIP(realIP);
+      const path = typeof req.body?.path === "string" ? req.body.path.slice(0, 200) : null;
+      await storage.createActivityLog({
+        type: "ui_event",
+        userId: req.userId ?? null,
+        ipAddress: realIP,
+        userAgent: req.get("User-Agent") || null,
+        city: location.city,
+        country: location.country,
+        path,
+        details: JSON.stringify({ ...sanitizeEventDetail(req.body?.detail), event, vid: readVisitorId(req) }),
+        groupId: req.groupId ?? null,
+      } as any);
+      res.json({ ok: true });
+    } catch (err) {
+      // Tracking failures must not block the user flow.
+      console.error("[/api/track/event] error:", err);
       res.json({ ok: false });
     }
   });
@@ -2716,281 +3095,80 @@ export async function registerRoutes(app: Express): Promise<Server> {
           groupId: activityLogs.groupId,
           groupName: groups.name,
           createdAt: activityLogs.createdAt,
+          groupGames: groups.enabledGames,
+          groupSlug: groups.slug,
+          userGames: users.enabledGames,
         })
         .from(activityLogs)
         .leftJoin(users, eq(activityLogs.userId, users.id))
         .leftJoin(groups, eq(activityLogs.groupId, groups.id))
-        .where(and(inArray(activityLogs.type, ["page_visit", "tab_view"]), gte(activityLogs.createdAt, since)))
+        .where(
+          and(
+            // Visits and tab changes, plus the finer timeline events: app
+            // backgrounded/foregrounded, wheel/fixtures/chart use, reminders.
+            inArray(activityLogs.type, ["page_visit", "tab_view", "ui_event", "push_sent"]),
+            gte(activityLogs.createdAt, since),
+          ),
+        )
         .orderBy(desc(activityLogs.createdAt))
-        .limit(20000);
-      res.json(rows);
+        .limit(40000);
+      // A logged-out visit carries the
+      // browser's anonymous visitor id; if that browser has been logged in
+      // within the window, say who it probably was.
+      const vidOf = (raw: string | null): string | null => {
+        if (!raw || !raw.includes('"vid"')) return null;
+        try {
+          const v = JSON.parse(raw)?.vid;
+          return typeof v === "string" && v ? v : null;
+        } catch {
+          return null;
+        }
+      };
+      const vidOwner = new Map<string, string>();
+      for (const r of rows) {
+        if (!r.username) continue;
+        const vid = vidOf(r.details);
+        if (vid && !vidOwner.has(vid)) vidOwner.set(vid, r.username);
+      }
+      // The landing route "/" renders a different game per group (and person):
+      // for a Lawro-only group it IS the Lawro page. Send which one, so the feed
+      // doesn't label a Lawro visit as a generic "Home".
+      res.json(
+        rows.map(({ groupGames, groupSlug, userGames, ...r }) => ({
+          ...r,
+          likelyUsername: r.username ? null : vidOwner.get(vidOf(r.details) ?? "") ?? null,
+          landingGame:
+            groupGames == null
+              ? null
+              : landingGame(
+                  effectiveGames(
+                    groupGames as string[],
+                    userGames as string[] | null,
+                    groupSlug ?? undefined,
+                    r.username ?? undefined,
+                  ),
+                ),
+        })),
+      );
     } catch (err: any) {
       console.error("[/api/admin/activity] error:", err);
       res.status(500).json({ error: err?.message || "Failed to load activity" });
     }
   });
 
-  // GET /api/admin/audit — merged audit feed across ALL groups (admin-key
-  // gated). Pulls LMS selection logs and Lawro activity-log entries, joins
-  // through to usernames, group names, and team/match names, reverse-chron.
-  app.get("/api/admin/audit", async (req, res) => {
+  app.get("/api/admin/metrics", async (req, res) => {
     if (!requireAdmin(req, res)) return;
+    const parsed = z.object({
+      days: z.coerce.number().int().min(1).max(365).default(28),
+      interval: z.enum(["day", "week", "month"]).default("day"),
+    }).safeParse(req.query);
+    if (!parsed.success) return res.status(400).json({ error: "Choose 1–365 days and day, week or month." });
     try {
-      const { db } = await import("./db");
-      const {
-        lmsSelectionLogs,
-        lmsParticipants,
-        users,
-        groups,
-        teams,
-        matches,
-        activityLogs,
-      } = await import("@shared/schema");
-      const { eq, inArray, desc } = await import("drizzle-orm");
-
-      // 1) LMS team-selection changes (all groups).
-      const lmsRows = await db
-        .select({
-          id: lmsSelectionLogs.id,
-          createdAt: lmsSelectionLogs.createdAt,
-          username: users.username,
-          groupId: users.groupId,
-          groupName: groups.name,
-          gameweek: lmsSelectionLogs.gameweek,
-          originalTeamId: lmsSelectionLogs.originalTeamId,
-          newTeamId: lmsSelectionLogs.newTeamId,
-          ipAddress: lmsSelectionLogs.ipAddress,
-          userAgent: lmsSelectionLogs.userAgent,
-          city: lmsSelectionLogs.city,
-          country: lmsSelectionLogs.country,
-        })
-        .from(lmsSelectionLogs)
-        .innerJoin(lmsParticipants, eq(lmsSelectionLogs.participantId, lmsParticipants.id))
-        .innerJoin(users, eq(lmsParticipants.userId, users.id))
-        .leftJoin(groups, eq(users.groupId, groups.id))
-        .orderBy(desc(lmsSelectionLogs.createdAt));
-
-      // 2) Prediction League ("Lawro") pick changes (all groups).
-      const predTypes = ["prediction_set", "prediction_change", "prediction_delete"];
-      const predRows = await db
-        .select({
-          id: activityLogs.id,
-          createdAt: activityLogs.createdAt,
-          username: users.username,
-          groupId: users.groupId,
-          groupName: groups.name,
-          type: activityLogs.type,
-          details: activityLogs.details,
-          ipAddress: activityLogs.ipAddress,
-          city: activityLogs.city,
-          country: activityLogs.country,
-          userAgent: activityLogs.userAgent,
-        })
-        .from(activityLogs)
-        .innerJoin(users, eq(activityLogs.userId, users.id))
-        .leftJoin(groups, eq(users.groupId, groups.id))
-        .where(inArray(activityLogs.type, predTypes))
-        .orderBy(desc(activityLogs.createdAt));
-
-      // Lookup maps for nicer summaries — teams (PL) are global so we don't
-      // filter by group.
-      const allTeams = await db.select().from(teams);
-      const teamById = new Map(allTeams.map((t) => [t.id, t]));
-      const allPlMatches = await db.select().from(matches);
-      const plMatchById = new Map(allPlMatches.map((m) => [m.id, m]));
-      const plMatchLabel = (matchId: number | null | undefined): string => {
-        if (matchId == null) return "?";
-        const m = plMatchById.get(matchId);
-        if (!m) return `match #${matchId}`;
-        const home = teamById.get(m.homeTeamId)?.shortName ?? `#${m.homeTeamId}`;
-        const away = teamById.get(m.awayTeamId)?.shortName ?? `#${m.awayTeamId}`;
-        return `${home} vs ${away}`;
-      };
-
-      const events: Array<{
-        id: string;
-        type: string;
-        createdAt: Date;
-        username: string;
-        groupId: number | null;
-        groupName: string | null;
-        summary: string;
-        ipAddress: string;
-        city: string | null;
-        country: string | null;
-        userAgent: string | null;
-      }> = [];
-
-      for (const r of lmsRows) {
-        const original = r.originalTeamId ? teamById.get(r.originalTeamId)?.shortName : null;
-        // remove-selection logs newTeamId = 0 for a cleared pick.
-        const cleared = !r.newTeamId;
-        const next = teamById.get(r.newTeamId)?.shortName ?? `#${r.newTeamId}`;
-        const summary = cleared
-          ? `LMS GW${r.gameweek}: cleared pick${original ? ` (was ${original})` : ""}`
-          : original
-            ? `LMS GW${r.gameweek}: changed pick from ${original} to ${next}`
-            : `LMS GW${r.gameweek}: picked ${next}`;
-        events.push({
-          id: `lms:${r.id}`,
-          type: "lms_selection",
-          createdAt: r.createdAt,
-          username: r.username,
-          groupId: r.groupId,
-          groupName: r.groupName,
-          summary,
-          ipAddress: r.ipAddress,
-          city: r.city,
-          country: r.country,
-          userAgent: r.userAgent, // captured since we added the column
-        });
-      }
-
-      for (const r of predRows) {
-        let parsed: any = {};
-        try {
-          parsed = r.details ? JSON.parse(r.details) : {};
-        } catch {
-          parsed = {};
-        }
-        const label = plMatchLabel(parsed.matchId);
-        let summary = r.type;
-        if (r.type === "prediction_delete") {
-          summary = `Lawro ${label}: cleared prediction`;
-        } else {
-          const score = `${parsed.homeScore}-${parsed.awayScore}`;
-          summary =
-            r.type === "prediction_change"
-              ? `Lawro ${label}: changed prediction to ${score}`
-              : `Lawro ${label}: predicted ${score}`;
-        }
-        events.push({
-          id: `pred:${r.id}`,
-          type: r.type,
-          createdAt: r.createdAt,
-          username: r.username,
-          groupId: r.groupId,
-          groupName: r.groupName,
-          summary,
-          ipAddress: r.ipAddress,
-          city: r.city,
-          country: r.country,
-          userAgent: r.userAgent,
-        });
-      }
-
-      events.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      res.json(events);
-    } catch (err: any) {
-      console.error("[/api/audit] error:", err);
-      res.status(500).json({ error: err?.message || "Failed to load audit log" });
-    }
-  });
-
-  // Shared admin guard: requests must carry x-api-key === ADMIN_API_KEY.
-  function requireAdmin(req: any, res: any): boolean {
-    const apiKey = req.headers["x-api-key"] as string | undefined;
-    if (!apiKey || apiKey !== process.env.ADMIN_API_KEY) {
-      res.status(401).json({ error: "Unauthorized" });
-      return false;
-    }
-    return true;
-  }
-
-  // ---------- Admin: group + player management ----------
-  // A group is one closed circle of friends with its own players, games and
-  // rules. Players are just `users` rows for that group. These endpoints let
-  // the admin create groups, set their rules, and manage rosters from one
-  // screen. All are gated by the admin API key (x-api-key), same as the other
-  // /api/admin routes.
-
-  const ALLOWED_GAMES = ["lms", "predictions"] as const;
-
-  function cleanGames(input: unknown): string[] {
-    if (!Array.isArray(input)) return [];
-    return ALLOWED_GAMES.filter((g) => input.includes(g));
-  }
-
-  // POST /api/admin/groups — create a new group.
-  // Body: { name, slug, enabledGames?, buyIn?, lmsAllOutRule? }
-  app.post("/api/admin/groups", async (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    try {
-      const { db } = await import("./db");
-      const { groups, LMS_ALL_OUT_RULES } = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
-
-      const name = String(req.body?.name ?? "").trim();
-      const slug = String(req.body?.slug ?? "").trim().toLowerCase();
-      if (!name) return res.status(400).json({ error: "name is required" });
-      if (!/^[a-z0-9-]+$/.test(slug)) {
-        return res
-          .status(400)
-          .json({ error: "slug is required and must be lowercase letters, numbers and dashes" });
-      }
-
-      const existing = await db.select().from(groups).where(eq(groups.slug, slug));
-      if (existing.length > 0) {
-        return res.status(409).json({ error: `A group with slug "${slug}" already exists` });
-      }
-
-      const enabledGames = cleanGames(req.body?.enabledGames);
-      const buyIn = Math.max(0, Math.floor(Number(req.body?.buyIn ?? 10)) || 0);
-      const lmsAllOutRule = (LMS_ALL_OUT_RULES as readonly string[]).includes(req.body?.lmsAllOutRule)
-        ? req.body.lmsAllOutRule
-        : "rollover";
-
-      const [group] = await db
-        .insert(groups)
-        .values({ name, slug, enabledGames, buyIn, lmsAllOutRule })
-        .returning();
-      res.status(201).json({ ok: true, group });
-    } catch (err: any) {
-      console.error("[admin/groups POST] error:", err);
-      res.status(500).json({ error: err?.message || "Failed to create group" });
-    }
-  });
-
-  // PATCH /api/admin/groups/:id — update a group's name, games or rules.
-  // Body: any of { name, enabledGames, buyIn, lmsAllOutRule }
-  app.patch("/api/admin/groups/:id", async (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    try {
-      const { db } = await import("./db");
-      const { groups, LMS_ALL_OUT_RULES } = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
-
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid group id" });
-
-      const updates: Record<string, unknown> = {};
-      if (typeof req.body?.name === "string" && req.body.name.trim()) {
-        updates.name = req.body.name.trim();
-      }
-      if (req.body?.enabledGames !== undefined) {
-        updates.enabledGames = cleanGames(req.body.enabledGames);
-      }
-      if (req.body?.buyIn !== undefined) {
-        updates.buyIn = Math.max(0, Math.floor(Number(req.body.buyIn)) || 0);
-      }
-      if (req.body?.lmsAllOutRule !== undefined) {
-        if (!(LMS_ALL_OUT_RULES as readonly string[]).includes(req.body.lmsAllOutRule)) {
-          return res
-            .status(400)
-            .json({ error: `lmsAllOutRule must be one of: ${LMS_ALL_OUT_RULES.join(", ")}` });
-        }
-        updates.lmsAllOutRule = req.body.lmsAllOutRule;
-      }
-      if (Object.keys(updates).length === 0) {
-        return res.status(400).json({ error: "No valid fields to update" });
-      }
-
-      const [group] = await db.update(groups).set(updates).where(eq(groups.id, id)).returning();
-      if (!group) return res.status(404).json({ error: "No such group" });
-      res.json({ ok: true, group });
-    } catch (err: any) {
-      console.error("[admin/groups PATCH] error:", err);
-      res.status(500).json({ error: err?.message || "Failed to update group" });
+      const { getMetrics } = await import("./metrics");
+      res.json(await getMetrics(parsed.data.days, parsed.data.interval));
+    } catch (error) {
+      console.error("[/api/admin/metrics]", error);
+      res.status(500).json({ error: "Failed to load metrics" });
     }
   });
 
@@ -3067,6 +3245,230 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // GET /api/admin/changelog — entries ship in the same PR as each change and
+  // are baked into the deployed build. No GitHub call or follow-up PR is needed.
+  app.get("/api/admin/changelog", (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    res.json({ entries: [...changelog].sort((a, b) => changelogDate(b).localeCompare(changelogDate(a))) });
+  });
+
+  // GET /api/admin/audit — merged audit feed across ALL groups (admin-key
+  // gated). Pulls LMS selection logs, Lawro and rule acknowledgements, joins
+  // through to usernames, group names, and team/match names, reverse-chron.
+  app.get("/api/admin/audit", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { db } = await import("./db");
+      const {
+        lmsSelectionLogs,
+        lmsParticipants,
+        users,
+        groups,
+        teams,
+        matches,
+        activityLogs,
+      } = await import("@shared/schema");
+      const { eq, inArray, desc } = await import("drizzle-orm");
+
+      // 1) LMS team-selection changes (all groups).
+      const lmsRows = await db
+        .select({
+          id: lmsSelectionLogs.id,
+          createdAt: lmsSelectionLogs.createdAt,
+          username: users.username,
+          groupId: users.groupId,
+          groupName: groups.name,
+          gameweek: lmsSelectionLogs.gameweek,
+          originalTeamId: lmsSelectionLogs.originalTeamId,
+          newTeamId: lmsSelectionLogs.newTeamId,
+          ipAddress: lmsSelectionLogs.ipAddress,
+          userAgent: lmsSelectionLogs.userAgent,
+          city: lmsSelectionLogs.city,
+          country: lmsSelectionLogs.country,
+        })
+        .from(lmsSelectionLogs)
+        .innerJoin(lmsParticipants, eq(lmsSelectionLogs.participantId, lmsParticipants.id))
+        .innerJoin(users, eq(lmsParticipants.userId, users.id))
+        .leftJoin(groups, eq(users.groupId, groups.id))
+        .orderBy(desc(lmsSelectionLogs.createdAt));
+
+      // 2) Prediction League ("Lawro") pick changes (all groups).
+      const predTypes = ["prediction_set", "prediction_change", "prediction_delete"];
+      const predRows = await db
+        .select({
+          id: activityLogs.id,
+          createdAt: activityLogs.createdAt,
+          username: users.username,
+          groupId: users.groupId,
+          groupName: groups.name,
+          type: activityLogs.type,
+          details: activityLogs.details,
+          ipAddress: activityLogs.ipAddress,
+          city: activityLogs.city,
+          country: activityLogs.country,
+          userAgent: activityLogs.userAgent,
+        })
+        .from(activityLogs)
+        .innerJoin(users, eq(activityLogs.userId, users.id))
+        .leftJoin(groups, eq(users.groupId, groups.id))
+        .where(inArray(activityLogs.type, predTypes))
+        .orderBy(desc(activityLogs.createdAt));
+
+      // 3) Rule-change pop-up acknowledgements, attributed to the active group
+      // recorded at the time of acknowledgement.
+      const ruleRows = await db
+        .select({
+          id: activityLogs.id,
+          createdAt: activityLogs.createdAt,
+          username: users.username,
+          groupId: activityLogs.groupId,
+          groupName: groups.name,
+          type: activityLogs.type,
+          details: activityLogs.details,
+          ipAddress: activityLogs.ipAddress,
+          city: activityLogs.city,
+          country: activityLogs.country,
+          userAgent: activityLogs.userAgent,
+        })
+        .from(activityLogs)
+        .innerJoin(users, eq(activityLogs.userId, users.id))
+        .leftJoin(groups, eq(activityLogs.groupId, groups.id))
+        .where(eq(activityLogs.type, "rule_change_acknowledged"))
+        .orderBy(desc(activityLogs.createdAt));
+
+      // Lookup maps for nicer summaries — teams and matches are global so we
+      // don't filter by group.
+      const allTeams = await db.select().from(teams);
+      const teamById = new Map(allTeams.map((t) => [t.id, t]));
+      const allPlMatches = await db.select().from(matches);
+      const plMatchById = new Map(allPlMatches.map((m) => [m.id, m]));
+      const plMatchLabel = (matchId: number | null | undefined): string => {
+        if (matchId == null) return "?";
+        const m = plMatchById.get(matchId);
+        if (!m) return `match #${matchId}`;
+        const home = teamById.get(m.homeTeamId)?.shortName ?? `#${m.homeTeamId}`;
+        const away = teamById.get(m.awayTeamId)?.shortName ?? `#${m.awayTeamId}`;
+        return `${home} vs ${away}`;
+      };
+      const events: Array<{
+        id: string;
+        type: string;
+        createdAt: Date;
+        username: string;
+        groupId: number | null;
+        groupName: string | null;
+        summary: string;
+        ipAddress: string;
+        city: string | null;
+        country: string | null;
+        userAgent: string | null;
+      }> = [];
+
+      for (const r of lmsRows) {
+        const original = r.originalTeamId ? teamById.get(r.originalTeamId)?.shortName : null;
+        // remove-selection logs newTeamId = 0 for a cleared pick.
+        const cleared = !r.newTeamId;
+        const next = teamById.get(r.newTeamId)?.shortName ?? `#${r.newTeamId}`;
+        const summary = cleared
+          ? `LMS GW${r.gameweek}: cleared pick${original ? ` (was ${original})` : ""}`
+          : original
+            ? `LMS GW${r.gameweek}: changed pick from ${original} to ${next}`
+            : `LMS GW${r.gameweek}: picked ${next}`;
+        events.push({
+          id: `lms:${r.id}`,
+          type: "lms_selection",
+          createdAt: r.createdAt,
+          username: r.username,
+          groupId: r.groupId,
+          groupName: r.groupName,
+          summary,
+          ipAddress: r.ipAddress,
+          city: r.city,
+          country: r.country,
+          userAgent: r.userAgent, // captured since we added the column
+        });
+      }
+
+      for (const r of predRows) {
+        let parsed: any = {};
+        try {
+          parsed = r.details ? JSON.parse(r.details) : {};
+        } catch {
+          parsed = {};
+        }
+        const label = plMatchLabel(parsed.matchId);
+        let summary = r.type;
+        if (r.type === "prediction_delete") {
+          summary = `Lawro ${label}: cleared prediction`;
+        } else {
+          const score = `${parsed.homeScore}-${parsed.awayScore}`;
+          summary =
+            r.type === "prediction_change"
+              ? `Lawro ${label}: changed prediction to ${score}`
+              : `Lawro ${label}: predicted ${score}`;
+        }
+        events.push({
+          id: `pred:${r.id}`,
+          type: r.type,
+          createdAt: r.createdAt,
+          username: r.username,
+          groupId: r.groupId,
+          groupName: r.groupName,
+          summary,
+          ipAddress: r.ipAddress,
+          city: r.city,
+          country: r.country,
+          userAgent: r.userAgent,
+        });
+      }
+
+      for (const r of ruleRows) {
+        const { details: rawDetails, ...event } = r;
+        let details: { ruleChangeIds?: number[]; changes?: RuleChangeItem[] } = {};
+        try {
+          details = rawDetails ? JSON.parse(rawDetails) : {};
+        } catch { /* Older or malformed details still get a generic summary. */ }
+        const ids = details.ruleChangeIds ?? [];
+        // Acknowledgements name the accepted value. Including the previous
+        // value here makes a superseded policy look like part of the rule.
+        const changes = (details.changes ?? []).map((c) =>
+          `${c.game === "lawro" ? "Lawro" : "LMS"} — ${c.label}: ${c.to}`,
+        );
+        events.push({
+          ...event,
+          id: `rules:${r.id}`,
+          summary: `Acknowledged rule ${ids.length === 1 ? "change" : "changes"}${ids.length ? ` #${ids.join(", #")}` : ""}${changes.length ? `: ${changes.join("; ")}` : ""}`,
+        });
+      }
+
+      // 6) Settings changes, reminders and feature usage (server/auditExtras.ts).
+      const { extraAuditEvents } = await import("./auditExtras");
+      events.push(...(await extraAuditEvents()));
+
+      events.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      res.json(events);
+    } catch (err: any) {
+      console.error("[/api/audit] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to load audit log" });
+    }
+  });
+
+  // ---------- Admin ----------
+
+  function requireAdmin(req: any, res: any): boolean {
+    const apiKey = req.headers["x-api-key"] as string | undefined;
+    if (!apiKey || apiKey !== process.env.ADMIN_API_KEY) {
+      res.status(401).json({ error: "Unauthorized" });
+      return false;
+    }
+    return true;
+  }
+
+  // ---------- Admin: player roster management ----------
+  // Players in a group are just `users` rows for that group. These endpoints
+  // let the admin add/remove players for any group from one screen. All are
+  // gated by the admin API key (x-api-key), same as the other /api/admin routes.
+
   // GET /api/admin/groups-players — every group with its roster of players.
   app.get("/api/admin/groups-players", async (req, res) => {
     if (!requireAdmin(req, res)) return;
@@ -3091,23 +3493,42 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // competition so the admin UI can show an "in LMS / not in LMS"
           // indicator. hasActiveLms lets the UI distinguish "nobody's in it"
           // from "there's no live competition to be in".
-          const competition = await storage.getCurrentLmsCompetition(g.id);
+          const playsLms = ((g.enabledGames as string[]) ?? []).includes("lms");
+          const { competition, open } = playsLms
+            ? await lmsRosterWindow(g.id)
+            : { competition: undefined, open: false };
           let lmsUserIds = new Set<number>();
           if (competition) {
             const participants = await storage.getLmsParticipantsByCompetition(competition.id);
             lmsUserIds = new Set(participants.map((p) => p.userId));
           }
+          // Added too late for the running competition: they join the next one.
+          const waiting = playsLms ? await waitingIds(g.id) : new Set<number>();
           return {
             id: g.id,
             slug: g.slug,
             name: g.name,
             enabledGames: g.enabledGames,
-            buyIn: g.buyIn,
-            lmsAllOutRule: g.lmsAllOutRule,
+            // Resolved rules, for the welcome message the admin copies.
+            rules: resolveGroupRules(g.rules),
             hasActiveLms: !!competition,
+            // The running competition, and whether new players can still join
+            // it (its first deadline hasn't passed) — drives the add form's hint.
+            lms: competition
+              ? {
+                  name: competition.name,
+                  startGameweek: competition.startGameweek,
+                  currentGameweek: competition.currentGameweek,
+                  open,
+                }
+              : null,
             players: allUsers
               .filter((u) => u.groupId === g.id)
-              .map((u) => ({ ...u, inLms: lmsUserIds.has(u.id) })),
+              .map((u) => ({
+                ...u,
+                inLms: lmsUserIds.has(u.id),
+                lmsNext: !lmsUserIds.has(u.id) && waiting.has(u.id),
+              })),
           };
         }),
       );
@@ -3118,131 +3539,171 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // POST /api/admin/players — add a player to a group. Body: { groupId, username }
+  // POST /api/admin/players — add a new player to a group.
+  // Body: { groupId, username, enabledGames? }
   //
-  // Creates the user row (with a personal login code) if they're new, and — when
-  // the group runs LMS and has an active competition — enrols them into it so
-  // they can immediately make picks. Works for any group's games: for a
-  // predictions-only group (e.g. Lawro) it simply creates the player + code,
-  // which is all they need to sign in and play. Idempotent and works for players
-  // who already exist in the group for other games — adding an existing name is
-  // not an error, it just ensures LMS enrolment where applicable.
+  // Creates the player's row and personal login code. `enabledGames` picks
+  // which of the group's games they see (default: all of them; stored as NULL
+  // = inherit, like the Sees toggles). If they can see Last Man Standing they
+  // go into the current competition only while it's still open (before its
+  // first deadline); once it's under way they wait for the next one — never
+  // into a competition that's already started (see lmsEnrolment.ts). A name
+  // that's already in the group (ignoring case) is refused, so adding never
+  // quietly changes an existing player.
   app.post("/api/admin/players", async (req, res) => {
     if (!requireAdmin(req, res)) return;
     try {
       const { db } = await import("./db");
       const { groups, users } = await import("@shared/schema");
-      const { and, eq } = await import("drizzle-orm");
+      const { and, eq, ne, sql: dsql } = await import("drizzle-orm");
 
       const groupId = Number(req.body?.groupId);
-      const username = String(req.body?.username ?? "").trim();
-      if (!Number.isFinite(groupId)) {
+      const username = String(req.body?.username ?? "").trim().replace(/\s+/g, " ");
+      if (!Number.isInteger(groupId)) {
         return res.status(400).json({ error: "groupId must be a number" });
       }
       if (!username) {
-        return res.status(400).json({ error: "username is required" });
+        return res.status(400).json({ error: "Enter the player's name" });
+      }
+      if (username.length > 40) {
+        return res.status(400).json({ error: "That name is too long (40 characters at most)" });
+      }
+      const requested = req.body?.enabledGames;
+      if (requested !== undefined && (!Array.isArray(requested) || requested.some((g: unknown) => typeof g !== "string"))) {
+        return res.status(400).json({ error: "enabledGames must be a list of games" });
       }
 
       const [group] = await db.select().from(groups).where(eq(groups.id, groupId));
       if (!group) return res.status(404).json({ error: "No such group" });
+      const groupGames = (group.enabledGames as string[]) ?? [];
 
-      // Find or create the user row. An existing name is not an error — we fall
-      // through to (re)enrolling them in LMS below.
-      const existing = await db
-        .select({
+      const [existing] = await db
+        .select({ id: users.id, username: users.username })
+        .from(users)
+        .where(and(eq(users.groupId, groupId), dsql`lower(${users.username}) = lower(${username})`));
+      if (existing) {
+        return res.status(409).json({
+          error: `"${existing.username}" is already in ${group.name}. Use the Sees toggles and LMS badge under their name to change what they play.`,
+        });
+      }
+
+      // Their games: the chosen ones the group offers, in the group's order.
+      // All of them is stored as NULL (inherit), so games the group adds later
+      // show for them too.
+      let override: string[] | null = null;
+      if (requested !== undefined) {
+        const chosen = groupGames.filter((g) => (requested as string[]).includes(g));
+        if (chosen.length === 0) return res.status(400).json({ error: "Pick at least one game for them" });
+        override = chosen.length === groupGames.length ? null : chosen;
+      }
+
+      const { resolveLoginCodeForUsername, generateUniqueLoginCode } = await import("./loginCodes");
+      const [player] = await db
+        .insert(users)
+        .values({
+          username,
+          password: "password",
+          groupId,
+          enabledGames: override,
+          // In an original group, reuse the person's code if they already
+          // belong to another original group. A self-service group's names
+          // don't identify anyone, so a new player there gets a fresh code.
+          loginCode: group.inviteToken
+            ? await generateUniqueLoginCode()
+            : await resolveLoginCodeForUsername(username),
+        })
+        .returning({
           id: users.id,
           username: users.username,
           groupId: users.groupId,
           loginCode: users.loginCode,
-        })
-        .from(users)
-        .where(and(eq(users.username, username), eq(users.groupId, groupId)));
-      let player = existing[0];
-      const createdUser = !player;
-      if (!player) {
-        const { resolveLoginCodeForUsername, generateUniqueLoginCode } = await import("./loginCodes");
-        const [row] = await db
-          .insert(users)
-          .values({
-            username,
-            password: "password",
-            groupId,
-            // In an admin-created group, reuse the person's code if they already
-            // belong to another one. A self-service group's names don't identify
-            // anyone, so a new player there gets a fresh code.
-            loginCode: group.inviteToken
-              ? await generateUniqueLoginCode()
-              : await resolveLoginCodeForUsername(username),
-          })
-          .returning({
-            id: users.id,
-            username: users.username,
-            groupId: users.groupId,
-            loginCode: users.loginCode,
-          });
-        player = row;
-      }
-
-      // Enrol into the group's current active LMS competition if there is one.
-      let enrolledInLms = false;
-      let alreadyInLms = false;
-      const competition = await storage.getCurrentLmsCompetition(groupId);
-      if (competition) {
-        const participants = await storage.getLmsParticipantsByCompetition(competition.id);
-        if (participants.some((p) => p.userId === player.id)) {
-          alreadyInLms = true;
-        } else {
-          await storage.createLmsParticipant({
-            competitionId: competition.id,
-            userId: player.id,
-            isActive: "true",
-          } as any);
-          enrolledInLms = true;
-        }
-      }
-
-      // Their personal login code — shown to the admin so it can be shared.
-      const codeSuffix = player.loginCode ? ` Their login code is ${player.loginCode}.` : "";
-
-      if (enrolledInLms) {
-        const gw = competition!.currentGameweek;
-        const message = createdUser
-          ? `Added "${username}" and enrolled them in the current LMS competition (GW${gw}).${codeSuffix}`
-          : `Enrolled "${username}" in the current LMS competition (GW${gw}).${codeSuffix}`;
-        return res.json({ ok: true, createdUser, enrolledInLms, player, message });
-      }
-
-      // No LMS enrolment happened. What that means depends on the group's games.
-      const groupHasLms = (group.enabledGames as string[]).includes("lms");
-
-      // A brand-new user: their row (and login code) is created regardless of
-      // game, which for a predictions-only group (Lawro) is all they need.
-      if (createdUser) {
-        const message = groupHasLms
-          ? `Added "${username}". There's no active LMS competition to enrol them into yet.${codeSuffix}`
-          : `Added "${username}" to ${group.name}.${codeSuffix}`;
-        return res.json({ ok: true, createdUser, enrolledInLms: false, player, message });
-      }
-
-      // Existing user, nothing to enrol. For a non-LMS group (e.g. Lawro) that's
-      // a harmless no-op — they're already a player — so report success rather
-      // than an error. For an LMS group it's worth flagging with a 409.
-      if (!groupHasLms) {
-        return res.json({
-          ok: true,
-          createdUser: false,
-          enrolledInLms: false,
-          player,
-          message: `"${username}" is already in ${group.name}.${codeSuffix}`,
+          enabledGames: users.enabledGames,
         });
+
+      // Other groups this code already signs into (same person, original
+      // groups only), so the admin knows the new row is linked to them.
+      const linkedGroups = player.loginCode
+        ? (
+            await db
+              .select({ name: groups.name })
+              .from(users)
+              .innerJoin(groups, eq(groups.id, users.groupId))
+              .where(and(eq(users.loginCode, player.loginCode), ne(users.id, player.id)))
+          ).map((r) => r.name)
+        : [];
+
+      const placement: LmsPlacement =
+        groupGames.includes("lms") && seesLms(override)
+          ? await placeInLms(groupId, player.id, { ipAddress: getRealIP(req), userAgent: req.get("User-Agent") ?? null })
+          : { status: "none" };
+      const { describePlacement } = await import("./lmsEnrolment");
+
+      // What their header will actually show so the confirmation
+      // matches the app.
+      const sees = effectiveGames(groupGames, override, group.slug, player.username).filter(
+        (g) => !NAV_HIDDEN_GAMES.includes(g),
+      );
+      const parts = [`Added "${username}" to ${group.name}.`];
+      const lmsLine = describePlacement(placement);
+      if (lmsLine) parts.push(lmsLine);
+      if (linkedGroups.length) {
+        parts.push(`Same login code as their row in ${linkedGroups.join(", ")}, so one code signs them into both.`);
       }
-      const error = alreadyInLms
-        ? `"${username}" is already in the current LMS competition.`
-        : `"${username}" is already in ${group.name}, and there's no active LMS competition to enrol them into.`;
-      return res.status(409).json({ error });
+      if (player.loginCode) parts.push(`Their login code is ${player.loginCode}.`);
+      res.json({
+        ok: true,
+        createdUser: true,
+        player,
+        sees,
+        linkedGroups,
+        lms:
+          placement.status === "joined"
+            ? { status: "joined", competition: placement.competition.name }
+            : placement.status === "waiting"
+              ? { status: "waiting", after: placement.after?.name ?? null }
+              : { status: "none" },
+        enrolledInLms: placement.status === "joined",
+        message: parts.join(" "),
+      });
     } catch (err: any) {
       console.error("[admin/players POST] error:", err);
       res.status(500).json({ error: err?.message || "Failed to add player" });
+    }
+  });
+
+  // POST /api/admin/players/:userId/lms — put a player back into LMS: into the
+  // current competition if it hasn't started yet, otherwise onto the list for
+  // the next one. Never into a competition that's under way.
+  app.post("/api/admin/players/:userId/lms", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const { db } = await import("./db");
+      const { users, groups } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const userId = Number(req.params.userId);
+      if (!Number.isInteger(userId)) return res.status(400).json({ error: "Invalid user id" });
+      const [user] = await db.select().from(users).where(eq(users.id, userId));
+      if (!user) return res.status(404).json({ error: "No such player" });
+      const [group] = await db.select().from(groups).where(eq(groups.id, user.groupId));
+      if (!((group?.enabledGames as string[]) ?? []).includes("lms")) {
+        return res.status(409).json({ error: `${group?.name ?? "This group"} doesn't play Last Man Standing` });
+      }
+      if (!seesLms(user.enabledGames as string[] | null)) {
+        return res.status(409).json({ error: `Turn LMS on under ${user.username}'s name first` });
+      }
+      const { describePlacement } = await import("./lmsEnrolment");
+      const placement = await placeInLms(user.groupId, userId, {
+        ipAddress: getRealIP(req),
+        userAgent: req.get("User-Agent") ?? null,
+      });
+      res.json({
+        ok: true,
+        status: placement.status,
+        message: `${user.username}: ${describePlacement(placement) || "nothing to change."}`,
+      });
+    } catch (err: any) {
+      console.error("[admin/players lms POST] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to add them to LMS" });
     }
   });
 
@@ -3251,7 +3712,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Behaviour depends on the group's games:
   //  - LMS group: removes the player from the group's *current* (non-completed)
   //    Last Man Standing competition(s) only. Does NOT delete the user; past LMS
-  //    competitions are untouched.
+  //    competitions, nothing else is touched.
   //  - Non-LMS group (e.g. a predictions-only "Lawro" group): takes the player
   //    out of THIS group entirely — deletes their group-scoped data (their
   //    predictions) and their user row for this group. Because a person has a
@@ -3321,6 +3782,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
+      // Nor will they join the next one.
+      await stopWaiting([userId]);
+
       const message = removedFrom > 0
         ? `Removed "${user.username}" from the current LMS competition. Past competitions are unchanged.`
         : `"${user.username}" wasn't in an active LMS competition — nothing to remove. Past competitions are unchanged.`;
@@ -3328,6 +3792,94 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (err: any) {
       console.error("[admin/players DELETE] error:", err);
       res.status(500).json({ error: err?.message || "Failed to remove player" });
+    }
+  });
+
+  // ---------- Admin: permanent deletion (groups + players) ----------
+  // Hard-deletes a player or a whole group and everything hanging off it, in one
+  // transaction (server/adminDeletion.ts says exactly what goes and what stays).
+  // Each has a GET preview with the counts the confirm dialog shows. Admin key
+  // only. A group delete also needs the group's name typed back, plus
+  // confirmOriginal for the original groups (Fairweathermen, Rovers).
+
+  function playerDeleteScope(raw: unknown): "group" | "everywhere" | null {
+    const v = raw ?? "group";
+    return v === "group" || v === "everywhere" ? v : null;
+  }
+
+  // GET /api/admin/players/:userId/deletion-preview?scope=group|everywhere
+  app.get("/api/admin/players/:userId/deletion-preview", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const userId = Number(req.params.userId);
+      const scope = playerDeleteScope(req.query.scope);
+      if (!Number.isInteger(userId) || !scope) return res.status(400).json({ error: "Bad player id or scope" });
+      const { previewPlayerDeletion } = await import("./adminDeletion");
+      const preview = await previewPlayerDeletion(userId, scope);
+      if (!preview) return res.status(404).json({ error: "No such player" });
+      res.json(preview);
+    } catch (err: any) {
+      console.error("[admin player deletion-preview] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to work out the deletion" });
+    }
+  });
+
+  // DELETE /api/admin/players/:userId/permanent  body { scope: "group" | "everywhere" }
+  app.delete("/api/admin/players/:userId/permanent", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const userId = Number(req.params.userId);
+      const scope = playerDeleteScope(req.body?.scope);
+      if (!Number.isInteger(userId) || !scope) return res.status(400).json({ error: "Bad player id or scope" });
+      const { deletePlayerPermanently } = await import("./adminDeletion");
+      const done = await deletePlayerPermanently(userId, scope);
+      if (!done) return res.status(404).json({ error: "No such player" });
+      const where = done.deletedFrom.map((d) => d.groupName).join(", ");
+      console.log(`[admin] Permanently deleted player "${done.player.username}" (${scope}) from: ${where}`);
+      res.json({ ok: true, deleted: done, message: `Deleted "${done.player.username}" permanently from ${where}.` });
+    } catch (err: any) {
+      console.error("[admin player permanent DELETE] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to delete player" });
+    }
+  });
+
+  // GET /api/admin/groups/:groupId/deletion-preview
+  app.get("/api/admin/groups/:groupId/deletion-preview", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const groupId = Number(req.params.groupId);
+      if (!Number.isInteger(groupId)) return res.status(400).json({ error: "Bad group id" });
+      const { previewGroupDeletion } = await import("./adminDeletion");
+      const preview = await previewGroupDeletion(groupId);
+      if (!preview) return res.status(404).json({ error: "No such group" });
+      res.json(preview);
+    } catch (err: any) {
+      console.error("[admin group deletion-preview] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to work out the deletion" });
+    }
+  });
+
+  // DELETE /api/admin/groups/:groupId  body { confirmName, confirmOriginal? }
+  app.delete("/api/admin/groups/:groupId", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const groupId = Number(req.params.groupId);
+      if (!Number.isInteger(groupId)) return res.status(400).json({ error: "Bad group id" });
+      const { db } = await import("./db");
+      const { groups } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const [group] = await db.select().from(groups).where(eq(groups.id, groupId));
+      if (!group) return res.status(404).json({ error: "No such group" });
+      const { checkGroupConfirmation, deleteGroupPermanently } = await import("./adminDeletion");
+      const refusal = checkGroupConfirmation(group, req.body ?? {});
+      if (refusal) return res.status(refusal.status).json({ error: refusal.error });
+      const done = await deleteGroupPermanently(groupId);
+      if (!done) return res.status(404).json({ error: "No such group" });
+      console.log(`[admin] Permanently deleted group "${done.group.name}" (${done.group.slug}, ${done.players} players)`);
+      res.json({ ok: true, deleted: done, message: `Deleted the group "${done.group.name}" permanently.` });
+    } catch (err: any) {
+      console.error("[admin group DELETE] error:", err);
+      res.status(500).json({ error: err?.message || "Failed to delete group" });
     }
   });
 
@@ -3367,13 +3919,50 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       await db.update(users).set({ enabledGames: override }).where(eq(users.id, userId));
 
-      const effective = override ?? groupGames;
+      // Keep their LMS place in step with whether they can see LMS, so nobody
+      // is in a competition they can't see (the missed-pick rule would pick or
+      // knock them out unseen), and showing LMS lets them play.
+      let lmsNote = "";
+      if (groupGames.includes("lms")) {
+        const before = seesLms(user.enabledGames as string[] | null);
+        const after = seesLms(override);
+        if (before && !after) {
+          await stopWaiting([userId]);
+          const { competition, open } = await lmsRosterWindow(group.id);
+          if (competition) {
+            const participants = await storage.getLmsParticipantsByCompetition(competition.id);
+            if (participants.some((p) => p.userId === userId)) {
+              if (open) {
+                const { removeFromCompetition } = await import("./lmsEnrolment");
+                await removeFromCompetition(competition.id, userId);
+                lmsNote = ` Took them out of ${competition.name}, which hasn't started yet.`;
+              } else {
+                lmsNote = ` They're still in ${competition.name}, which is under way, so the missed-pick rule still applies to them. Use Remove to take them out of it.`;
+              }
+            }
+          }
+        } else if (!before && after) {
+          const { describePlacement } = await import("./lmsEnrolment");
+          const placement = await placeInLms(group.id, userId, {
+            ipAddress: getRealIP(req),
+            userAgent: req.get("User-Agent") ?? null,
+          });
+          const line = describePlacement(placement);
+          if (line) lmsNote = ` ${line}`;
+        }
+      }
+
+      // What their header will actually show, so the admin's confirmation
+      // matches the app.
+      const effective = effectiveGames(groupGames, override, group.slug, user.username).filter(
+        (g) => !NAV_HIDDEN_GAMES.includes(g),
+      );
       res.json({
         ok: true,
         player: { id: user.id, username: user.username },
         enabledGames: override,
         effectiveGames: effective,
-        message: `Updated ${user.username}'s games: ${effective.join(", ") || "none"}.`,
+        message: `${user.username} now sees: ${effective.join(", ") || "none"}.${lmsNote}`,
       });
     } catch (err: any) {
       console.error("[admin/players games PATCH] error:", err);

@@ -1,4 +1,5 @@
 import geoip from 'geoip-lite';
+import { isPrivateIP } from '@shared/ipLocation';
 
 export interface LocationInfo {
   ip: string;
@@ -7,10 +8,9 @@ export interface LocationInfo {
 }
 
 export function getLocationFromIP(ipAddress: string): LocationInfo {
-  // Skip geolocation for localhost/private IPs
-  if (ipAddress === '127.0.0.1' || ipAddress === '::1' || 
-      ipAddress.startsWith('192.168.') || ipAddress.startsWith('10.') ||
-      ipAddress.startsWith('172.')) {
+  // Skip geolocation for loopback/private-network IPs. Only 172.16.0.0/12 is
+  // private; other 172.x addresses (e.g. iCloud Private Relay's) are public.
+  if (isPrivateIP(ipAddress)) {
     return {
       ip: ipAddress,
       city: 'Local',

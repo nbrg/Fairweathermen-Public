@@ -12,7 +12,24 @@ const app = express();
 // reverse proxy / load balancer (nginx, a platform edge, etc.).
 app.set('trust proxy', true);
 
-app.use(express.json());
+// Basic browser security headers (no extra dependency). Don't advertise the
+// framework; stop browsers MIME-sniffing responses; keep full URLs (invite
+// tokens live in /join/<token>) out of the Referer sent to other sites. In
+// production only, also refuse to be framed (clickjacking) and pin HTTPS
+// (some hosted dev previews show the app inside an iframe, so not in dev).
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  if (process.env.NODE_ENV === 'production') {
+    res.set('X-Frame-Options', 'DENY');
+    res.set('Content-Security-Policy', "frame-ancestors 'none'");
+    res.set('Strict-Transport-Security', 'max-age=15552000');
+  }
+  next();
+});
+
+app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: false }));
 
 // Never let the browser or any intermediary proxy/CDN cache API responses —
@@ -20,38 +37,6 @@ app.use(express.urlencoded({ extended: false }));
 // live scores/minutes lag by up to a minute.
 app.use("/api", (_req, res, next) => {
   res.set("Cache-Control", "no-store");
-  next();
-});
-
-// Defence in depth: strip secrets out of every API response, whatever the
-// handler happens to put there. A login code is a person's private sign-in
-// credential and a password hash is a secret, so neither should ever reach a
-// client. Passwords are removed for everyone; login codes are removed for
-// everyone *except* an admin-authenticated request (the admin roster screen
-// deliberately shows codes so the owner can hand them out, and those requests
-// carry the admin key). This runs regardless of what any individual endpoint
-// returns, so a new query that accidentally selects a whole user row can't
-// leak these fields.
-app.use("/api", (req, res, next) => {
-  const adminAuthed =
-    !!process.env.ADMIN_API_KEY && req.headers["x-api-key"] === process.env.ADMIN_API_KEY;
-  const stripKeys = adminAuthed
-    ? new Set(["password"])
-    : new Set(["password", "loginCode", "login_code"]);
-  const scrub = (value: any, seen = new Set<any>()): any => {
-    if (Array.isArray(value)) return value.map((v) => scrub(v, seen));
-    if (value && typeof value === "object") {
-      if (seen.has(value)) return value;
-      seen.add(value);
-      for (const key of Object.keys(value)) {
-        if (stripKeys.has(key)) delete value[key];
-        else value[key] = scrub(value[key], seen);
-      }
-    }
-    return value;
-  };
-  const originalJson = res.json.bind(res);
-  res.json = (body: any) => originalJson(scrub(body));
   next();
 });
 
@@ -160,9 +145,15 @@ app.use((req, res, next) => {
   const { reminderProcessor } = await import('./reminderProcessor');
   reminderProcessor.start();
 
+  // "Watch the wheel" push 90s after an LMS deadline (no-op without VAPID keys)
+  const { lmsWheelProcessor } = await import('./lmsWheel');
+  lmsWheelProcessor.start();
+
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
+    // Don't hand internal error text (SQL, stack details) to the client on a
+    // server error; it's still logged below.
+    const message = status >= 500 ? "Internal Server Error" : err.message || "Error";
     console.error("Express error:", err);
     res.status(status).json({ message });
   });

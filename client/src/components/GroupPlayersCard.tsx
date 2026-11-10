@@ -16,6 +16,8 @@ type Player = {
   username: string;
   isOwner: boolean;
   inLms: boolean;
+  // Joined after the running competition started: plays the next one.
+  lmsNext?: boolean;
   canRemove: boolean;
 };
 
@@ -127,8 +129,12 @@ export default function GroupPlayersCard({ groupId }: { groupId: number | undefi
                     {p.isOwner && <span className="ml-2 text-xs font-normal text-gray-500">Admin</span>}
                   </div>
                   {lms && (
-                    <div className={`text-xs ${p.inLms ? "text-emerald-700" : "text-gray-500"}`}>
-                      {p.inLms ? `Playing ${lms.name}` : `Sitting out ${lms.name}`}
+                    <div className={`text-xs ${p.inLms ? "text-emerald-700" : p.lmsNext ? "text-sky-700" : "text-gray-500"}`}>
+                      {p.inLms
+                        ? `Playing ${lms.name}`
+                        : p.lmsNext
+                          ? `Joined too late for ${lms.name}, so plays the next one`
+                          : `Sitting out ${lms.name}`}
                     </div>
                   )}
                 </div>

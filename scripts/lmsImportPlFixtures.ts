@@ -10,7 +10,7 @@
 // matchTime is stored as a London-local "YYYY-MM-DD HH:MM:SS" string to match
 // the existing convention (see londonStringToUtcMs / routes.ts).
 //
-// Usage (run on a dev DB first and check the Fixtures tab):
+// Usage (run on DEV first and check the Fixtures tab):
 //   tsx scripts/lmsImportPlFixtures.ts                            # dry run, no DB writes
 //   tsx scripts/lmsImportPlFixtures.ts --confirm                 # import 2026/27 (season 2026)
 //   tsx scripts/lmsImportPlFixtures.ts --confirm --season 2025   # a different season

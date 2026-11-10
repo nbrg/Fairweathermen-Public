@@ -31,7 +31,7 @@ self.addEventListener("push", (event) => {
     icon: data.icon || "/icons/icon-192.png",
     badge: "/icons/icon-192.png",
     tag: data.tag || undefined, // collapses duplicate reminders on the device
-    data: { url: data.url || "/" },
+    data: { url: data.url || "/", tag: data.tag || null },
     requireInteraction: false,
   };
   event.waitUntil(self.registration.showNotification(title, options));
@@ -51,5 +51,20 @@ self.addEventListener("notificationclick", (event) => {
       }
       if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
     }),
+  );
+});
+
+// A notification swiped away without being opened — recorded so /admin/activity
+// can show who ignored a reminder. (Opening one is recorded by the page it
+// opens: push links carry ?via=push.) Best-effort; the cookie identifies them.
+self.addEventListener("notificationclose", (event) => {
+  const tag = (event.notification.data && event.notification.data.tag) || event.notification.tag || null;
+  event.waitUntil(
+    fetch("/api/track/event", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event: "push_dismissed", path: null, detail: { tag } }),
+    }).catch(() => {}),
   );
 });

@@ -1,5 +1,8 @@
+import { ThemeProvider } from "@/lib/theme";
+import MetricsPage from "@/pages/MetricsPage";
 import { useEffect } from "react";
 import { Switch, Route, useLocation } from "wouter";
+import { LmsWheel } from "@/components/lms/LmsWheel";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -7,7 +10,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import HomePage from "@/pages/HomePage";
 import AdminStats from "@/pages/AdminStats";
-import AdminPage from "@/pages/AdminPage";
 import LastManStandingPage from "./pages/LastManStandingPage";
 import AdminPlayers from "@/pages/AdminPlayers";
 import AdminNotifications from "@/pages/AdminNotifications";
@@ -15,15 +17,18 @@ import GroupGate from "@/pages/GroupGate";
 import GroupSwitch from "@/pages/GroupSwitch";
 import CreateGroup from "@/pages/CreateGroup";
 import JoinGroup from "@/pages/JoinGroup";
-import GroupSettings from "@/pages/GroupSettings";
+import SettingsPage from "@/pages/SettingsPage";
+import BottomNav from "@/components/BottomNav";
+import RuleChangesDialog from "@/components/RuleChangesDialog";
 import AuditPage from "@/pages/AuditPage";
-import GrowthPage from "@/pages/GrowthPage";
 import ActivityPage from "@/pages/ActivityPage";
+import GrowthPage from "@/pages/GrowthPage";
+import ChangesPage from "@/pages/ChangesPage";
 import HelpPage from "@/pages/HelpPage";
 import { GroupProvider, useGroup } from "@/contexts/GroupContext";
-import RuleChangesDialog from "@/components/RuleChangesDialog";
 import ScreenResolutionTracker from "@/components/ScreenResolutionTracker";
 import { usePageTracking } from "@/hooks/usePageTracking";
+import { landingGame } from "@shared/navGames";
 
 // The landing page (/) defaults to the group's primary game, in priority
 // order: Last Man Standing (the year-round game), then the Prediction League
@@ -31,8 +36,9 @@ import { usePageTracking } from "@/hooks/usePageTracking";
 // Header.tsx.
 function DefaultGame() {
   const { group } = useGroup();
-  const enabled = new Set(group?.enabledGames ?? ["lms", "predictions"]);
-  if (enabled.has("lms")) return <LastManStandingPage />;
+  // Precedence lives in shared/navGames.ts so /activity labels "/" the same way.
+  const game = landingGame(group?.enabledGames);
+  if (game === "lms") return <LastManStandingPage />;
   return <HomePage />;
 }
 
@@ -95,6 +101,7 @@ function Router() {
   const { group } = useGroup();
 
   return (
+    <>
     <Switch key={group?.id ?? "none"}>
       <Route path="/" component={DefaultGame} />
       <Route path="/last-man-standing" component={LastManStandingPage} />
@@ -104,22 +111,27 @@ function Router() {
       <Route path="/predictions" component={LawroRoute} />
       {/* Self-service group creation + invites (public; see GatedShell). */}
       <Route path="/create" component={CreateGroup} />
-      <Route path="/join/:token">
-        {(params) => <JoinGroup token={params.token} />}
-      </Route>
-      {/* Owner-only per-group rules + invite link. */}
-      <Route path="/group-settings" component={GroupSettings} />
-      <Route path="/admin" component={AdminStats} />
+      <Route path="/join/:token">{(params) => <JoinGroup token={params.token} />}</Route>
+      {/* Settings for everyone (theme, reminders, install, log out); the
+          group owner's rules, players and invite link are part of it too.
+          /group-settings is the old owner-only URL: it opens Settings at the
+          admin section. */}
+      <Route path="/settings">{() => <SettingsPage />}</Route>
+      <Route path="/group-settings">{() => <SettingsPage focusAdmin />}</Route>
+      <Route path="/admin/visitors" component={AdminStats} />
+      <Route path="/admin/metrics" component={MetricsPage} />
       <Route path="/admin/players" component={AdminPlayers} />
       <Route path="/admin/notifications" component={AdminNotifications} />
-      <Route path="/lms-admin" component={AdminPage} />
-      <Route path="/audit" component={AuditPage} />
       <Route path="/admin/growth" component={GrowthPage} />
-      <Route path="/activity" component={ActivityPage} />
+      <Route path="/admin/changes" component={ChangesPage} />
+      <Route path="/admin/audit" component={AuditPage} />
+      <Route path="/admin/activity" component={ActivityPage} />
       <Route path="/help" component={HelpPage} />
       {/* Fallback to 404 */}
       <Route component={NotFound} />
     </Switch>
+    <BottomNav />
+    </>
   );
 }
 
@@ -146,7 +158,9 @@ function GatedShell() {
   // (the keyboard closing changes the viewport height) during that window.
   useEffect(() => {
     if (!group) return;
+    let active = true;
     const toTop = () => {
+      if (!active) return;
       (document.activeElement as HTMLElement | null)?.blur?.();
       window.scrollTo(0, 0);
       document.documentElement.scrollTop = 0;
@@ -159,12 +173,27 @@ function GatedShell() {
     // a short window so normal scrolling isn't hijacked later.
     window.addEventListener("resize", toTop, { passive: true });
     const stopResize = setTimeout(() => window.removeEventListener("resize", toTop), 1500);
-    return () => {
+    // Once someone starts typing/tapping/scrolling, their focus and position
+    // take precedence. Delayed layout corrections used to blur the first
+    // Lawro input between its two digits and dismiss the mobile keyboard.
+    const interactions = ["pointerdown", "keydown", "input", "wheel"];
+    const stop = () => {
+      active = false;
       cancelAnimationFrame(raf);
       timers.forEach(clearTimeout);
       clearTimeout(stopResize);
       window.removeEventListener("resize", toTop);
+      window.removeEventListener("focusin", onScoreFocus, true);
+      interactions.forEach(type => window.removeEventListener(type, stop, true));
     };
+    // Keyboard/accessibility tools can focus a score without pointerdown. Stop
+    // before the next layout timer can blur it, even before its first keypress.
+    const onScoreFocus = (event: Event) => {
+      if ((event.target as HTMLElement).matches?.("input[data-score-input]")) stop();
+    };
+    window.addEventListener("focusin", onScoreFocus, true);
+    interactions.forEach(type => window.addEventListener(type, stop, { capture: true, passive: true }));
+    return stop;
   }, [group?.id]);
 
   const path =
@@ -193,29 +222,39 @@ function GatedShell() {
     <>
       <Router />
       {group && <RuleChangesDialog />}
+      {/* LMS randomiser wheel: a site-wide pop-up from a missed deadline until
+          the last wheel has spun (renders nothing otherwise). */}
+      {group && <LmsWheel />}
     </>
   );
 }
 
 function App() {
   return (
+    <ThemeProvider>
     <QueryClientProvider client={queryClient}>
       <GroupProvider>
         <TooltipProvider>
           <Toaster />
           <ScreenResolutionTracker />
-          <GatedShell />
+          {/* Breathing room under every page: the last card shouldn't sit flush
+              against the bottom edge (or the purple safe-area strip below), so
+              pad by the home-indicator inset plus a little extra. */}
+          <div style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 2rem)" }}>
+            <GatedShell />
+          </div>
           {/* Paint the bottom safe-area (home-indicator strip) in the same
               purple as the header so the installed PWA looks intentional top
               and bottom. Zero-height (invisible) on devices without an inset. */}
           <div
             aria-hidden
-            className="fixed inset-x-0 bottom-0 z-50 bg-primary"
+            className="fixed inset-x-0 bottom-0 z-30 bg-header"
             style={{ height: "env(safe-area-inset-bottom)" }}
           />
         </TooltipProvider>
       </GroupProvider>
     </QueryClientProvider>
+    </ThemeProvider>
   );
 }
 

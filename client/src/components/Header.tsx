@@ -7,8 +7,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { NotificationBell } from "@/components/NotificationBell";
 import { Settings } from "lucide-react";
+import { useEffect } from "react";
+import { reportPwaLaunchOnce } from "@/lib/push";
+import { GAME_TABS, useGameTabs } from "@/lib/gameTabs";
 
 // Lets a person who belongs to more than one group switch which one they're
 // currently viewing. Hidden for everyone in a single group. Switching clears
@@ -25,7 +27,7 @@ function GroupSwitcher() {
         const id = Number(v);
         if (id === group.id) return;
         // Stay on the current game tab if the new group offers it to this
-        // person (e.g. Lawro in one group → Lawro in another). Otherwise send
+        // person (e.g. LMS in Demo League → LMS in Rovers). Otherwise send
         // them to the landing route so the new group's primary game renders,
         // rather than the previous group's page under the new group.
         const currentGame = GAME_TABS.find(
@@ -51,64 +53,20 @@ function GroupSwitcher() {
   );
 }
 
-// Ordered game tabs — LMS, then Lawro. Each game is shown if ANY of the
-// person's groups offers it (not just the active one), so e.g. an LMS-only
-// group member who also plays Lawro elsewhere sees a Lawro tab without opening
-// the group dropdown. Clicking a tab that belongs to a different group switches
-// them into that group first, then navigates.
-// `short` is the label shown in the compact nav; LMS needs it to fit on a phone.
-const GAME_TABS: { key: string; label: string; short?: string; route: string; aliases?: string[] }[] = [
-  { key: "lms", label: "Last Man Standing", short: "LMS", route: "/last-man-standing", aliases: ["/lms"] },
-  { key: "predictions", label: "Lawro", route: "/lawro", aliases: ["/predictions"] },
-];
-
 export function Header() {
-  const [location, navigate] = useLocation();
-  const { group, availableGroups, switchGroup } = useGroup();
+  const [location] = useLocation();
+  const { group, availableGroups } = useGroup();
+  const { visibleTabs, gameToGroupId, isActiveTab, isSameGroup, openGame } = useGameTabs();
 
-  const activeGamesList = group?.enabledGames ?? ["lms", "predictions"];
-  const activeGames = new Set(activeGamesList);
+  // If we're running as an installed PWA, record it once so the owner can see
+  // who's actually installed the app (used to live in the reminders bell).
+  useEffect(() => {
+    reportPwaLaunchOnce();
+  }, []);
 
-  // Which group hosts each game: prefer the active group for games it offers, so
-  // shared games (e.g. LMS in both Demo League and Rovers) stay in the current
-  // group; then let the person's other groups fill in games the active one
-  // doesn't have (e.g. Lawro from a predictions-only group).
-  const gameToGroupId = new Map<string, number>();
-  if (group) for (const g of activeGamesList) gameToGroupId.set(g, group.id);
-  for (const ag of availableGroups) {
-    for (const g of ag.enabledGames ?? []) {
-      if (!gameToGroupId.has(g)) gameToGroupId.set(g, ag.id);
-    }
-  }
-
-  // Landing-route ("/") highlighting for the ACTIVE group's primary game, in
-  // priority order LMS → Lawro. Keep in step with DefaultGame in App.tsx.
-  // Cross-group tabs are never the active landing game, so they only highlight
-  // once you're actually in their group.
-  const rootIsLms = activeGames.has("lms");
-  const rootIsPredictions = !rootIsLms && activeGames.has("predictions");
-
-  const isActiveTab = (key: string): boolean => {
-    switch (key) {
-      case "lms":
-        return (
-          location === "/last-man-standing" ||
-          location === "/lms" ||
-          (location === "/" && rootIsLms)
-        );
-      case "predictions":
-        return location === "/lawro" || location === "/predictions" || (location === "/" && rootIsPredictions);
-      default:
-        return false;
-    }
-  };
-
-  // A game tab shows when any of the person's groups offers it.
-  const visibleTabs = GAME_TABS.filter((t) => gameToGroupId.has(t.key));
-
-  // A lone tab (e.g. someone who only plays LMS) switches to nothing, so the
-  // nav only shows once there are at least two games to choose between. The
-  // crest/wordmark links home, so there's still a way back from other pages.
+  // A lone tab switches to nothing, so the header nav only shows from two
+  // games up. It's desktop-only: on phones the games live in the bottom nav
+  // (BottomNav.tsx).
   const showGameNav = visibleTabs.length > 1;
 
   // Decide whether to show the group switcher. The game tabs alone can't always
@@ -116,14 +74,15 @@ export function Header() {
   //
   //  1. A game is offered by MORE THAN ONE of their groups (a "shared" game).
   //     Its tab only routes to one group's copy, so the dropdown is the only way
-  //     to reach the other. E.g. LMS running in both Demo League and Rovers: the
-  //     LMS tab always stays on the active group, so the dropdown is how you
-  //     reach the other group's LMS.
-  //  2. A group isn't reachable by any visible tab at all.
+  //     to reach the other. E.g. LMS runs in both Demo League
+  //     and Rovers, so whichever one is active, they need the dropdown to switch to
+  //     the other group's LMS (the LMS tab always stays on the active group).
+  //  2. A group isn't reachable by any visible tab at all (its games are all
+  //     hidden from the nav).
   //  3. Games aren't known yet (stale session) — fall back to showing it.
   //
-  // When every game is unique to one group, the tabs already cover everything,
-  // so the dropdown stays hidden.
+  // When every game is unique to one group (e.g. one group's LMS + another's Lawro),
+  // the tabs already cover everything, so the dropdown stays hidden.
   const gameGroupCount = new Map<string, number>();
   let gamesKnown = true;
   for (const ag of availableGroups) {
@@ -147,78 +106,64 @@ export function Header() {
     (!gamesKnown || hasSharedGame || anyGroupUnreachable);
   if (!showGameNav && !showSwitcher && !group) return null;
 
-  // Open a game: if it's hosted by another of the person's groups, switch there
-  // first (which reloads all group-scoped data), then navigate to its route.
-  async function openGame(key: string, route: string) {
-    const hostId = gameToGroupId.get(key);
-    if (hostId != null && group && hostId !== group.id) {
-      const res = await switchGroup(hostId);
-      if (!res.ok) return;
-    }
-    navigate(route);
-  }
-
   return (
     // pt includes the top safe-area inset so the header clears the notch /
     // Dynamic Island when installed as a PWA (viewport-fit=cover). Without it
     // the status bar overlaps the controls and they can't be tapped.
-    <header className="bg-primary text-white pb-4 pt-[calc(0.5rem+env(safe-area-inset-top))]">
+    <header className="bg-header text-white pb-3 pt-[calc(0.5rem+env(safe-area-inset-top))] md:pb-4">
       <div className="container mx-auto max-w-5xl px-4">
-        {/* Phones: controls row, then the game nav full width below. From md
-            up the nav sits centred in the same row as the wordmark/controls. */}
-        <div className="relative flex flex-col gap-3">
-          <div className="flex h-11 items-center justify-between gap-2">
-            <Link
-              href="/"
-              aria-label="Home"
-              className="flex min-w-0 items-center gap-2.5 rounded-xl"
+        {/* One row: the crest/wordmark, then the group switcher. On phones
+            the games and Settings live in the bottom nav (BottomNav.tsx);
+            from md up the game nav sits centred in this row and Settings is
+            the cog on the right. */}
+        <div className="relative flex h-11 items-center justify-between gap-2">
+          <Link
+            href="/"
+            aria-label="Home"
+            className="flex min-w-0 items-center gap-2.5 rounded-xl"
+          >
+            <img
+              src="/icons/logo.webp"
+              alt=""
+              aria-hidden
+              width={40}
+              height={40}
+              className="h-10 w-10 shrink-0"
+            />
+            {/* On a phone the group switcher needs the room, so the wordmark
+                shows only the crest there. */}
+            <span
+              className={`font-display truncate text-[21px] font-bold leading-none ${
+                showSwitcher ? "hidden sm:inline" : ""
+              }`}
             >
-              <img
-                src="/icons/logo.webp"
-                alt=""
-                aria-hidden
-                width={40}
-                height={40}
-                className="h-10 w-10 shrink-0"
-              />
-              {/* On a phone the group switcher needs the room, so the wordmark
-                  shows only the crest there. */}
-              <span
-                className={`font-display truncate text-[21px] font-bold leading-none ${
-                  showSwitcher ? "hidden sm:inline" : ""
-                }`}
-              >
-                Fairweathermen
-              </span>
-            </Link>
-            {(showSwitcher || group) && (
-              <div className="flex shrink-0 items-center gap-1">
-                {showSwitcher && <GroupSwitcher />}
-                {group?.isOwner && (
-                  <Link
-                    href="/group-settings"
-                    aria-label="Group settings"
-                    title="Group settings"
-                    className={`flex h-10 w-10 items-center justify-center rounded-full text-white/90 hover:bg-white/10 ${
-                      location === "/group-settings" ? "bg-white/15" : ""
-                    }`}
-                  >
-                    <Settings className="h-5 w-5" />
-                  </Link>
-                )}
-                {group && <NotificationBell />}
-              </div>
-            )}
-          </div>
+              Fairweathermen
+            </span>
+          </Link>
+          {(showSwitcher || group) && (
+            <div className="flex shrink-0 items-center gap-1">
+              {showSwitcher && <GroupSwitcher />}
+              {group && (
+                <Link
+                  href="/settings"
+                  aria-label="Settings"
+                  title="Settings"
+                  className={`hidden h-10 w-10 items-center justify-center rounded-full text-white/90 hover:bg-white/10 md:flex ${
+                    location === "/settings" || location === "/group-settings" ? "bg-white/15" : ""
+                  }`}
+                >
+                  <Settings className="h-5 w-5" />
+                </Link>
+              )}
+            </div>
+          )}
           {showGameNav && (
             <nav
               aria-label="Games"
-              className="grid gap-1 overflow-x-auto rounded-2xl bg-white/[0.08] p-1 md:absolute md:left-1/2 md:top-1/2 md:w-[26rem] md:-translate-x-1/2 md:-translate-y-1/2"
+              className="absolute left-1/2 top-1/2 hidden w-[26rem] -translate-x-1/2 -translate-y-1/2 gap-1 rounded-2xl bg-white/[0.08] p-1 md:grid"
               style={{ gridTemplateColumns: `repeat(${visibleTabs.length}, minmax(0, 1fr))` }}
             >
               {visibleTabs.map((tab) => {
-                const hostId = gameToGroupId.get(tab.key)!;
-                const sameGroup = group != null && hostId === group.id;
                 const className = `flex h-10 items-center justify-center rounded-xl px-3 text-sm transition-colors whitespace-nowrap ${
                   isActiveTab(tab.key)
                     ? "bg-white font-semibold text-primary shadow-sm"
@@ -226,7 +171,7 @@ export function Header() {
                 }`;
                 // Same-group games use client-side routing; cross-group games
                 // switch the active group first (openGame), then navigate.
-                return sameGroup ? (
+                return isSameGroup(tab.key) ? (
                   <Link key={tab.key} href={tab.route} className={className}>
                     {tab.short ?? tab.label}
                   </Link>

@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { isOwnUsername } from "@/lib/utils";
 import { AdminGate } from "@/components/AdminGate";
-import { AdminNav } from "@/components/AdminNav";
+import { describeLocation } from "@shared/ipLocation";
+import { AdminLayout } from "@/components/AdminNav";
 
 type GrowthEvent = {
   id: number;
@@ -248,9 +249,7 @@ export default function GrowthPage() {
   ];
 
   return (
-    <div className="min-h-screen bg-gray-100">
-      <main className="container mx-auto max-w-4xl px-4 py-6">
-        <AdminNav />
+    <AdminLayout>
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <h1 className="text-2xl font-bold text-primary">Growth</h1>
@@ -259,7 +258,7 @@ export default function GrowthPage() {
               joining, across all groups. Your own logins are left out.
             </p>
           </div>
-          <div className="inline-flex gap-1 rounded-lg border bg-white p-1">
+          <div className="inline-flex gap-1 rounded-lg border bg-card p-1">
             {RANGES.map((r) => (
               <button
                 key={r}
@@ -276,10 +275,10 @@ export default function GrowthPage() {
         </div>
 
         {isLoading && (
-          <div className="mt-4 rounded-md border bg-white p-6 text-sm text-gray-500">Loading…</div>
+          <div className="mt-4 rounded-md border bg-card p-6 text-sm text-gray-500">Loading…</div>
         )}
         {error && !data && (
-          <div className="mt-4 rounded-md border border-red-200 bg-white p-6 text-sm text-red-700">
+          <div className="mt-4 rounded-md border border-red-200 bg-card p-6 text-sm text-red-700">
             {(error as Error).message}
           </div>
         )}
@@ -295,7 +294,7 @@ export default function GrowthPage() {
                     type="button"
                     onClick={() => setTypeFilter(active ? null : key)}
                     className={`rounded-lg border p-3 text-center transition-colors ${
-                      active ? "border-primary bg-primary/5 ring-1 ring-primary" : "bg-white hover:bg-gray-50"
+                      active ? "border-primary bg-primary/5 ring-1 ring-primary" : "bg-card hover:bg-gray-50"
                     }`}
                   >
                     <div className="text-2xl font-bold text-primary">{n}</div>
@@ -319,7 +318,7 @@ export default function GrowthPage() {
                   {newGroups.length} new in the last {days} days · {data.groups.length} in total
                 </span>
               </div>
-              <div className="overflow-x-auto rounded-lg border bg-white">
+              <div className="overflow-x-auto rounded-lg border bg-card">
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 text-left text-xs text-gray-500">
                     <tr>
@@ -383,7 +382,7 @@ export default function GrowthPage() {
                 )}
               </div>
               {feed.length === 0 ? (
-                <div className="rounded-lg border bg-white p-6 text-sm text-gray-500">
+                <div className="rounded-lg border bg-card p-6 text-sm text-gray-500">
                   Nothing in the last {days} days yet.
                 </div>
               ) : (
@@ -391,9 +390,9 @@ export default function GrowthPage() {
                   {feed.slice(0, 500).map((e) => {
                     const d = parseDetails(e);
                     const meta = TYPE_META[e.type] ?? { label: e.type, emoji: "•", tone: "bg-gray-100 text-gray-700" };
-                    const place = [e.city, e.country].filter(Boolean).join(", ");
+                    const place = describeLocation(e.ipAddress, e.city, e.country);
                     return (
-                      <div key={e.id} className="rounded-md border bg-white p-3">
+                      <div key={e.id} className="rounded-md border bg-card p-3">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className={`rounded px-2 py-0.5 text-[11px] font-semibold ${meta.tone}`}>
                             {meta.emoji} {meta.label}
@@ -417,7 +416,6 @@ export default function GrowthPage() {
             </section>
           </>
         )}
-      </main>
-    </div>
+    </AdminLayout>
   );
 }
