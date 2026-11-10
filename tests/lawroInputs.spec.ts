@@ -3,6 +3,12 @@ import { reseed } from "./seed";
 import { loginViaApi, CODES } from "./helpers";
 import { utcToLondonString } from "@shared/time";
 
+// The app's service worker has a fetch handler, and WebKit sends a
+// controlled page's requests through it, out of page.route()'s sight. These
+// cases intercept /api/predictions, so run them without the worker (as
+// Playwright recommends whenever requests are intercepted).
+test.use({ serviceWorkers: "block" });
+
 // Every case owns a fresh disposable fixture; no production URL/database.
 test.beforeEach(reseed);
 
