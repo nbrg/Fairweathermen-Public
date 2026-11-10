@@ -30,23 +30,24 @@ const PRIMARY_ROUTES: RouteRow[] = [
 
 // Admin / hidden routes — visible by direct URL only.
 const HIDDEN_ROUTES: RouteRow[] = [
+  { path: "/admin/metrics", name: "Metrics", description: "Engagement, growth, retention and audience dashboards. Admin-key gated across all groups." },
   {
     path: "/switch",
     name: "Switch group",
     description:
-      "Clears your group cookie and shows the code prompt. Use this to swap between groups you belong to (e.g. city ↔ lastman).",
+      "Clears your group cookie and shows the code prompt. Use this to swap between groups you belong to.",
   },
   {
-    path: "/audit",
+    path: "/admin/audit",
     name: "Audit log",
     description:
-      "Every pick or change made in this group — LMS team selections plus Lawro predictions. Shows who, when, from where, on what device. Group-scoped.",
+      "Pick and scoring history across all groups, with a group filter. Admin-key gated.",
   },
   {
-    path: "/activity",
+    path: "/admin/activity",
     name: "Activity log",
     description:
-      "Every site visit and sub-tab view for this group, grouped into sessions (consecutive activity within 30 mins). Useful for seeing who's been on the site recently and how long they spent.",
+      "Site visits and sub-tab views across all groups, grouped into sessions (consecutive activity within 30 mins). Admin-key gated.",
   },
   {
     path: "/help",
@@ -54,7 +55,7 @@ const HIDDEN_ROUTES: RouteRow[] = [
     description: "List of every URL on the site. Not linked from anywhere else.",
   },
   {
-    path: "/admin",
+    path: "/admin/visitors",
     name: "Admin stats",
     description:
       "General admin / visitor stats. Has its own API-key auth and bypasses the group gate.",
@@ -65,16 +66,11 @@ const HIDDEN_ROUTES: RouteRow[] = [
     description:
       "Add or remove players from any group's roster. Admin-key gated; removing a player also deletes their picks and predictions.",
   },
-  {
-    path: "/lms-admin",
-    name: "Admin — LMS",
-    description: "Legacy LMS admin page.",
-  },
 ];
 
 function RouteTable({ rows }: { rows: RouteRow[] }) {
   return (
-    <div className="overflow-x-auto rounded-md border bg-white">
+    <div className="overflow-x-auto rounded-md border bg-card">
       <table className="w-full text-sm">
         <thead>
           <tr className="text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-200">

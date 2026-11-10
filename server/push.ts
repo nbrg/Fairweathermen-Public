@@ -1,6 +1,7 @@
 import webpush from "web-push";
 import { db } from "./db";
-import { pushSubscriptions, users } from "@shared/schema";
+import { activityLogs, pushSubscriptions, users } from "@shared/schema";
+import { withPushMarker } from "@shared/activityEvents";
 import { eq, inArray } from "drizzle-orm";
 
 // Web-push (VAPID) config comes from the environment. Without keys the feature
@@ -125,7 +126,9 @@ export async function sendToUser(userId: number, payload: PushPayload): Promise<
     .where(inArray(pushSubscriptions.userId, ids));
   if (subs.length === 0) return 0;
 
-  const body = JSON.stringify(payload);
+  // Tag the link so the visit it leads to shows up as "opened from a reminder"
+  // in /admin/activity (the client strips the marker from the address bar).
+  const body = JSON.stringify({ ...payload, url: withPushMarker(payload.url || "/", payload.tag) });
   // urgency "high" tells the push service (FCM on Android especially) to deliver
   // immediately rather than batching it until the device next wakes — otherwise
   // a locked/idle Android phone in Doze can hold the notification indefinitely.
@@ -161,5 +164,26 @@ export async function sendToUser(userId: number, payload: PushPayload): Promise<
       }
     }),
   );
+  await logPushSent(userId, payload, sent, subs.length);
   return sent;
+}
+
+// One `push_sent` activity row per person per notification, so /admin/audit
+// and the /admin/activity timeline show when a reminder reached someone (and
+// how many of their devices accepted it). Never blocks the send.
+async function logPushSent(userId: number, payload: PushPayload, sent: number, devices: number): Promise<void> {
+  try {
+    const [row] = await db.select({ groupId: users.groupId }).from(users).where(eq(users.id, userId));
+    await db.insert(activityLogs).values({
+      type: "push_sent",
+      userId,
+      groupId: row?.groupId ?? null,
+      ipAddress: "server",
+      userAgent: null,
+      path: payload.url ?? null,
+      details: JSON.stringify({ tag: payload.tag ?? null, title: payload.title, body: payload.body, sent, devices }),
+    } as any);
+  } catch (err) {
+    console.error("[push] failed to log push_sent:", err);
+  }
 }

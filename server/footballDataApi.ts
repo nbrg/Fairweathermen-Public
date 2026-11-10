@@ -1,8 +1,10 @@
 import { storage } from './storage';
 import { utcToLondonString, londonStringToUtcMs } from '@shared/time';
-import { nextLiveMinute } from './liveMinute';
+import { nextLiveMinute, parseFdMinute } from './liveMinute';
+import { FPL_CHECK_FROM_MINUTE, fplSaysFinished } from './fplFinish';
 
-const API_BASE = 'https://api.football-data.org/v4';
+// Overridable so the tests can point the live sync at a mock feed.
+const API_BASE = process.env.FOOTBALL_DATA_API_BASE ?? 'https://api.football-data.org/v4';
 const API_KEY = process.env.FOOTBALL_DATA_API_KEY;
 const COMPETITION_CODE = 'PL';
 
@@ -194,7 +196,11 @@ export async function syncGameweek(
       continue;
     }
 
-    const newStatus = mapStatus(fd.status);
+    let newStatus = mapStatus(fd.status);
+    // A match already marked finished stays finished. football-data can keep
+    // calling it IN_PLAY for minutes after the whistle, after FPL has told us
+    // it's over (below); don't flip it back to live in the meantime.
+    if (localMatch.status === 'finished' && newStatus === 'in_progress') newStatus = 'finished';
     const newTime = utcToLondonString(fd.utcDate);
     const newDate = newTime.split(' ')[0];
 
@@ -208,6 +214,25 @@ export async function syncGameweek(
     if (options.updateScores) {
       const homeScore = fd.score.fullTime.home;
       const awayScore = fd.score.fullTime.away;
+
+      // From minute 90, ask FPL whether the match is actually over: it marks
+      // full time minutes before football-data does. FPL only decides *that*
+      // it's finished; the score stays football-data's (and must match FPL's).
+      const fdMinute = parseFdMinute(fd.minute);
+      if (
+        newStatus === 'in_progress' &&
+        fdMinute !== null &&
+        fdMinute >= FPL_CHECK_FROM_MINUTE &&
+        homeScore !== null &&
+        awayScore !== null
+      ) {
+        const homeTla = fd.homeTeam.tla || localTeams.find((t) => t.id === homeLocalId)?.shortName || '';
+        const awayTla = fd.awayTeam.tla || localTeams.find((t) => t.id === awayLocalId)?.shortName || '';
+        if (await fplSaysFinished({ matchTime: localMatch.matchTime, homeTla, awayTla, homeScore, awayScore })) {
+          console.log(`[FPL] ${homeTla} v ${awayTla} is over at ${fd.minute}' (${homeScore}-${awayScore}); marking finished ahead of football-data`);
+          newStatus = 'finished';
+        }
+      }
       if (homeScore !== null && awayScore !== null) {
         if (
           localMatch.homeScore !== homeScore ||

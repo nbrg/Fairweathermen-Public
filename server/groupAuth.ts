@@ -146,12 +146,6 @@ export function groupContext(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-// Rejects requests that don't have a verified group cookie.
-export function requireGroup(req: Request, res: Response, next: NextFunction) {
-  if (!req.groupId) return res.status(401).json({ error: "No group selected" });
-  next();
-}
-
 // ---- Anonymous visitor id (growth tracking) ----
 //
 // A random, unsigned first-party id ("fwm_vid") given to every browser on its
@@ -231,6 +225,12 @@ export async function logGrowthEvent(
   }
 }
 
+// Rejects requests that don't have a verified group cookie.
+export function requireGroup(req: Request, res: Response, next: NextFunction) {
+  if (!req.groupId) return res.status(401).json({ error: "No group selected" });
+  next();
+}
+
 // Writes an entry to activity_logs with the caller's IP, geolocation and
 // user agent. Used to record every pick/change for the /audit view.
 // userId here is the user whose pick was changed (NOT the caller — the
@@ -257,7 +257,7 @@ export async function logAuditEvent(
       city: location.city,
       country: location.country,
       path: req.path,
-      details: JSON.stringify(options.details),
+      details: JSON.stringify({ ...options.details, actorUserId: req.userId ?? null, actorRecorded: true }),
       groupId: req.groupId ?? null,
     } as any);
   } catch (err) {
@@ -269,7 +269,7 @@ export async function logAuditEvent(
 // True if the given userId belongs to the given group. Used by per-user
 // mutation endpoints to ensure picks/predictions can only be made for users
 // in the caller's group (so e.g. someone in lastman can't write picks as
-// Alex-united by guessing his userId).
+// Alex-another group by guessing his userId).
 export async function userInGroup(userId: number, groupId: number): Promise<boolean> {
   const { db } = await import("./db");
   const { users } = await import("@shared/schema");

@@ -29,6 +29,11 @@ reuse logic.
   key.
 - **Security** — no login code or password ever leaks through any `/api`
   response.
+- **Score entry, wheel and full time** — Lawro score boxes saving as you type
+  and recovering from a failed save, the LMS randomiser wheel, and a match being
+  marked finished from the second full-time feed (against a mock of both feeds).
+- **Phone navigation and settings** — the bottom nav, its picks-due dots, and
+  the Settings page with the light and dark themes.
 - **Smoke** — the landing page, the PWA manifest/service worker, and the
   `no-store` header on API responses.
 

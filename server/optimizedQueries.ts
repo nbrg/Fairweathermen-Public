@@ -84,7 +84,7 @@ export async function getOptimizedPredictionsWithMatches(groupId?: number): Prom
     // Step 3: Get all teams in a single query
     const allTeams = await db.select().from(teams);
     console.log(`Got ${allTeams.length} teams in ${Math.round(performance.now() - startTime)}ms`);
-
+    
     // Step 4: Create lookup maps for O(1) access
     const teamsMap = new Map<number, Team>();
     for (const team of allTeams) {
@@ -114,8 +114,6 @@ export async function getOptimizedPredictionsWithMatches(groupId?: number): Prom
       const matchPredictions = allPredictions.filter(p => p.matchId === match.id);
       
       for (const prediction of matchPredictions) {
-        // Score with the Lawro points in force for this match's gameweek, so an
-        // admin's points change never rescores a gameweek already played.
         const gwRules = lawroRulesFor(match.season, match.gameweek);
         const { points: basePoints, status } = calculatePoints(prediction, match, {
           exact: gwRules.exactScorePoints,
@@ -168,7 +166,7 @@ export async function getOptimizedLeaderboard(groupId?: number): Promise<UserWit
 
     // Step: 2: Get optimized predictions with matches (same group scope)
     const allPredictionsWithMatches = await getOptimizedPredictionsWithMatches(groupId);
-
+    
     // Step 3: Group predictions by user ID
     const predictionsByUser = new Map<number, PredictionWithMatch[]>();
     for (const prediction of allPredictionsWithMatches) {
@@ -228,7 +226,9 @@ export async function getOptimizedLeaderboard(groupId?: number): Promise<UserWit
 }
 
 /**
- * Helper function to calculate points for a prediction
+ * Helper function to calculate points for a prediction. `points` gives the
+ * group's configured Lawro points for an exact score / correct result (default
+ * 3 / 1); the status strings are unchanged so everything else keys off them.
  */
 function calculatePoints(
   prediction: Prediction,
@@ -243,12 +243,12 @@ function calculatePoints(
     return { points: 0, status: "not_started" };
   }
 
-  // Exact score (configurable; default 3 points)
+  // Exact score
   if (prediction.homeScore === match.homeScore && prediction.awayScore === match.awayScore) {
     return { points: points.exact, status: "exact_score" };
   }
-  
-  // Correct result type: win, lose, or draw (1 point)
+
+  // Correct result type: win, lose, or draw
   const predictionResult = prediction.homeScore > prediction.awayScore 
     ? "home_win" 
     : prediction.homeScore < prediction.awayScore 

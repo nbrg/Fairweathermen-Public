@@ -8,14 +8,27 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { CheckCircle, XCircle, Crown, Trophy, Calendar, HelpCircle, Lock } from "lucide-react";
+import { CheckCircle, XCircle, Crown, Trophy, Calendar, HelpCircle, Lock, Check, X, Asterisk } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import Header from "@/components/Header";
 import { useGroup } from "@/contexts/GroupContext";
-import { trackEvent } from "@/lib/track";
+import { trackEvent, trackUiEvent } from "@/lib/track";
 import { TeamPickerDialog } from "@/components/lms/TeamPickerDialog";
 import { TeamCrest } from "@/components/TeamCrest";
-import type { LmsCompetition, LmsParticipant, LmsSelection, Team, User, Match } from "@shared/schema";
+import type {
+  LmsCompetition,
+  LmsParticipant,
+  LmsSelection,
+  Team,
+  User,
+  Match,
+  GroupRules,
+  LmsMissedPolicy,
+  LmsAllOutPolicy,
+} from "@shared/schema";
+import { resolveGroupRules } from "@shared/schema";
+import { londonStringToUtcMs } from "@shared/time";
+import { isCityGroup, isRoversGroup } from "@shared/originalGroups";
 
 type MatchWithTeams = Match & { homeTeam: Team; awayTeam: Team };
 
@@ -76,10 +89,26 @@ function opponentForSeason(
 // corner ✓/✗ result marker, and a light result tint. States:
 //  - out:     player was knocked out before this gameweek → blank cell
 //  - empty:   no pick (and still in) → a muted dash
-//  - hidden:  pick made but redacted until kickoff → a lock
+//  - hidden:  pick made but redacted until kickoff → a lock; a random pick
+//             whose randomiser wheel hasn't landed yet → a wheel
+//  - missed:  no pick by the deadline under the "eliminate" rule (a row with no
+//             team that counts as a loss) → a red "Missed" cell
 //  - pick:    the crest badge
-// Ref for the Team Selections grid: open it scrolled fully right so the latest
-// gameweek shows without scrolling. A module-level function keeps the ref
+// One look for every LMS grid (selections, history, fixtures, P/L, stats):
+// a rounded frame, a muted header row with small uppercase labels, light row
+// dividers, and a frozen first column (see .table-sticky-first in index.css).
+// border-separate keeps the frozen column's edge attached when it scrolls.
+const GRID_WRAP = "table-sticky-first overflow-x-auto rounded-xl border border-border";
+const GRID_TABLE =
+  "w-full border-separate border-spacing-0 text-xs sm:text-sm [&_tbody_tr:last-child>td]:border-b-0";
+const GRID_TH =
+  "h-9 whitespace-nowrap border-b border-border bg-muted px-2 text-center text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground";
+const GRID_TH_FIRST = `${GRID_TH} !text-left pl-3`;
+const GRID_TD = "border-b border-border/70 px-2 py-2 text-center";
+const GRID_TD_FIRST = "border-b border-border/70 py-2 pl-3 pr-2 text-left font-medium whitespace-nowrap";
+
+// Ref for the Team selections grid and History's final table: open them scrolled
+// fully right so the latest gameweeks show without scrolling. A module-level function keeps the ref
 // stable, so it runs once on mount and never fights the player's own scrolling.
 function scrollGridToLatest(el: HTMLDivElement | null) {
   if (el) el.scrollLeft = el.scrollWidth;
@@ -98,69 +127,118 @@ function LmsSelectionCell({
   isHidden?: boolean;
   isOut?: boolean;
 }) {
-  // Knocked out before this week — render nothing, so it's obvious they're gone.
+  const td = "border-b border-border/70 px-1 py-1 text-center align-middle";
+  // Every state is a same-sized tile, so the grid stays even. Crest and fixture
+  // sit side by side in a short tile, so the grid stays compact enough to
+  // screenshot into a group chat.
+  const tile = "mx-auto flex h-8 w-20 items-center justify-center gap-1 rounded-lg px-1.5";
+
+  // Knocked out before this week — an empty, greyed cell, so it's obvious they're gone.
   if (isOut) {
-    return (
-      <td
-        className="border border-gray-300 p-0 bg-gray-100/60 dark:bg-gray-800/40"
-        aria-label="Out of the competition"
-      />
-    );
+    return <td className={`${td} bg-muted/50`} aria-label="Out of the competition" />;
   }
 
   if (!selection) {
     return (
-      <td className="border border-gray-300 p-0">
-        <div className="w-full h-full flex items-center justify-center py-1 text-xs text-gray-400">–</div>
+      <td className={td}>
+        <div className={`${tile} text-muted-foreground/60`}>–</div>
+      </td>
+    );
+  }
+
+  if (isHidden && (selection as any).wheel === true) {
+    return (
+      <td className={td}>
+        <div className={`${tile} bg-amber-100 text-lg`} title="Missed the deadline: the randomiser wheel picks this team">
+          <span role="img" aria-label="Missed the deadline: the wheel picks this team">🎡</span>
+        </div>
       </td>
     );
   }
 
   if (isHidden) {
     return (
-      <td className="border border-gray-300 p-0">
-        <div className="w-full h-full flex items-center justify-center py-1" title="Pick made — hidden until kickoff">
-          <Lock className="h-3.5 w-3.5 text-gray-400" aria-label="Pick made, hidden until kickoff" />
+      <td className={td}>
+        <div className={`${tile} bg-muted`} title="Pick made — hidden until kickoff">
+          <Lock className="h-3.5 w-3.5 text-muted-foreground" aria-label="Pick made, hidden until kickoff" />
+        </div>
+      </td>
+    );
+  }
+
+  if (selection.teamId == null) {
+    return (
+      <td className={td}>
+        <div
+          className={`${tile} bg-rose-100 text-[10px] font-semibold uppercase tracking-wide text-rose-800 ring-2 ring-inset ring-rose-500`}
+          title="No pick by the deadline — counted as a lost life"
+        >
+          Missed
         </div>
       </td>
     );
   }
 
   const teamShortName = team?.shortName || "Unknown";
-  const isRandom = (selection as any).isRandomlyAssigned === true || (selection as any).isRandomlyAssigned === "true";
+  const randomFlag = (selection as any).isRandomlyAssigned ?? (selection as any).is_randomly_assigned;
+  const isRandom = randomFlag === true || randomFlag === "true";
   const won = selection.result === "w";
   const lost = selection.result === "l";
-  // Green/red fill plus a corner ✓/✗ for the win/loss result — no left accent bar.
-  const bg = won
-    ? "bg-emerald-200 dark:bg-emerald-800/60"
+  // Won / lost show as a green / red tile with a strong outline and a solid
+  // corner tick or cross, so who went through and who went out reads at a
+  // glance; a pick still to be played is a plain tile.
+  const tone = won
+    ? "bg-emerald-100 ring-2 ring-emerald-500"
     : lost
-    ? "bg-rose-200 dark:bg-rose-800/60"
-    : "";
+    ? "bg-rose-100 ring-2 ring-rose-500"
+    : "bg-card ring-1 ring-border";
+  const fixtureText = won
+    ? "text-emerald-800"
+    : lost
+    ? "text-rose-800"
+    : "text-muted-foreground";
 
   return (
-    <td className={`border border-gray-300 p-0 ${bg}`}>
-      <div className="relative w-full h-full flex flex-col items-center justify-center gap-0.5 py-0.5 px-0.5">
-        {won && <CheckCircle className="absolute top-0.5 right-0.5 h-2.5 w-2.5 text-emerald-600 dark:text-emerald-400" aria-label="Won" />}
-        {lost && <XCircle className="absolute top-0.5 right-0.5 h-2.5 w-2.5 text-rose-600 dark:text-rose-400" aria-label="Lost" />}
+    <td className={td}>
+      <div className={`${tile} relative ring-inset ${tone}`}>
+        {won && (
+          <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-emerald-600 text-white shadow-sm" aria-label="Won">
+            <Check className="h-3 w-3" strokeWidth={3} />
+          </span>
+        )}
+        {lost && (
+          <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-rose-600 text-white shadow-sm" aria-label="Lost">
+            <X className="h-3 w-3" strokeWidth={3} />
+          </span>
+        )}
         {isRandom && (
-          <span className="absolute top-0 left-1 text-amber-500 text-xs font-bold leading-none" title="Randomly assigned after the deadline">*</span>
+          // A solid amber corner badge (mirroring the won/lost badge on the
+          // other corner) so a random pick stands out on mobile as well.
+          <span
+            className="absolute -left-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm ring-1 ring-white"
+            title="Randomly assigned after the deadline"
+            aria-label="Random pick"
+            data-testid="lms-random-pick-badge"
+          >
+            <Asterisk className="h-3 w-3" strokeWidth={3.5} />
+          </span>
         )}
 
         {/* The crest alone identifies the team (its monogram fallback carries the
             abbreviation when a real crest isn't available). */}
-        <span title={team?.name ?? teamShortName}>
+        <span className="flex shrink-0" title={team?.name ?? teamShortName}>
           {team ? (
-            <TeamCrest team={team} size={26} transparent />
+            <TeamCrest team={team} size={20} transparent />
           ) : (
-            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-gray-200 dark:bg-gray-700 text-[9px] font-bold text-gray-600 dark:text-gray-300">
+            <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[8px] font-bold text-muted-foreground">
               {teamShortName.slice(0, 3)}
             </span>
           )}
         </span>
 
         {opponent && (
-          <div className="text-[8px] sm:text-[9px] font-medium opacity-75 leading-none text-center">
-            {opponent.isHome ? "Home" : "Away"} vs {opponent.short}
+          <div className={`whitespace-nowrap text-[10px] font-medium leading-none ${fixtureText}`}>
+            {opponent.short} ({opponent.isHome ? "H" : "A"})
           </div>
         )}
       </div>
@@ -170,101 +248,146 @@ function LmsSelectionCell({
 
 // Whether a participant is out of the competition before a given gameweek — so
 // their cells from the round *after* elimination onward render the same "out"
-// state in every view. Primarily driven by an earlier losing pick (present in
-// both live and historical data), so the live and history tables agree; the
-// eliminatedInRound flag is a fallback.
+// state in every view. Primarily driven by earlier losing picks (present in both
+// live and historical data), so the live and history tables agree: a player is
+// out once they've lost as many times as the group's lives (1 by default — one
+// loss and you're gone). The eliminatedInRound flag is a fallback.
 function isOutBeforeGameweek(
   participant: { isActive?: string; eliminatedInRound?: number | null; selections?: { gameweek: number; result?: string | null }[] },
   gameweek: number,
+  lives = 1,
 ): boolean {
-  const lostEarlier = (participant.selections ?? []).some((s) => s.result === "l" && s.gameweek < gameweek);
-  if (lostEarlier) return true;
+  const lossesBefore = (participant.selections ?? []).filter((s) => s.result === "l" && s.gameweek < gameweek).length;
+  if (lossesBefore >= Math.max(1, lives)) return true;
   const round = participant.eliminatedInRound ?? (participant as any).eliminated_in_round ?? null;
   return participant.isActive !== "true" && round != null && gameweek > round;
 }
 
-// Per-group LMS rule variants. Source of truth for both the rendered Rules
-// tab text AND the prize-distribution logic that runs when a competition
-// ends. Defaulting to the united shape keeps the page sensible for any
-// group not explicitly configured here.
+// The LMS rules a group plays by, in the shape this page needs for the Rules tab
+// text and the prize / P&L maths. Built from the group's configured rules
+// (group.rules, set by its admin at /group-settings) — see lmsRulesForGroup.
 type LmsRuleSet = {
+  // The buy-in: what each player pays per competition.
   entryFeeGbp: number;
-  // Hours before the first match's kickoff at which team selection locks.
-  lockHoursBeforeKickoff: number;
-  // When every remaining player is eliminated in the same gameweek, do we
-  // split the pot among the final round survivors or roll it over to the
-  // next competition? LMS is always winner-takes-all for a single survivor;
-  // the all-out case is the only structural difference between groups.
-  allOutBehaviour: "split_final_round" | "rollover";
+  // How many losing picks it takes to knock a player out.
+  lives: number;
+  // Minutes before the gameweek's first kick-off that picks lock.
+  deadlineMinutesBeforeKickoff: number;
+  missedPickPolicy: LmsMissedPolicy;
+  allOutPolicy: LmsAllOutPolicy;
+  // Rovers' long-standing all-out rule: when everyone left goes out together the
+  // players knocked out in the final round split the pot. Those competitions
+  // never recorded winner ids, so the joint winners are derived from the final
+  // elimination round instead.
+  legacySplitFinalRound: boolean;
+  // What the original groups' older competitions (which recorded no stake of
+  // their own) cost — see entryFeeForSeason.
+  legacyEntryFeeGbp: number;
 };
 
-// Fairweathermen (the original group, groupId 1) is the only group that plays a
-// £5 stake; every other group plays £10.
-const FAIRWEATHERMEN_LMS_RULES: LmsRuleSet = {
-  entryFeeGbp: 5,
-  lockHoursBeforeKickoff: 0,
-  allOutBehaviour: "rollover",
-};
+type GroupLike =
+  | { id?: number; slug?: string; name?: string; rules?: GroupRules; selfService?: boolean }
+  | null
+  | undefined;
 
-// Every group other than Fairweathermen: £10 stake, rollover on an all-out.
-const DEFAULT_LMS_RULES: LmsRuleSet = {
-  entryFeeGbp: 10,
-  lockHoursBeforeKickoff: 0,
-  allOutBehaviour: "rollover",
-};
-
-// Per-group overrides keyed by slug, for groups that differ from the £10
-// default in something other than the stake.
-const LMS_RULES_BY_GROUP: Record<string, LmsRuleSet> = {
-  // Rovers: £10 entry, and if all remaining players go out in the same gameweek
-  // they're joint winners and split the pot (no rollover).
-  rovers: {
-    entryFeeGbp: 10,
-    lockHoursBeforeKickoff: 0,
-    allOutBehaviour: "split_final_round",
-  },
-};
-
-type GroupLike = { id?: number; slug?: string; name?: string } | null | undefined;
-
-// Identify the Fairweathermen group robustly (id/slug/name) so a mislabelled
-// slug can never silently charge them the wrong stake. groupId 1 is Fairweathermen
-// by the schema's documented invariant.
+// Fairweathermen is matched by slug only (shared/originalGroups.ts), never by
+// name, which anyone creating a group can copy.
 function isFairweathermen(group: GroupLike): boolean {
-  if (!group) return false;
-  if (group.id === 1) return true;
-  const slug = group.slug?.toLowerCase();
-  if (slug === "fairweathermen" || slug === "united") return true;
-  return (group.name?.toLowerCase() ?? "").includes("fairweathermen");
+  return isCityGroup(group);
 }
 
-function rulesForGroup(group: GroupLike): LmsRuleSet {
-  if (isFairweathermen(group)) return FAIRWEATHERMEN_LMS_RULES;
-  const slug = group?.slug;
-  return (slug && LMS_RULES_BY_GROUP[slug]) || DEFAULT_LMS_RULES;
+// Groups with an admin set their LMS rules (buy-in included) at
+// /group-settings — every self-service group, plus the original groups Alex
+// was made admin of (the session's `selfService` flag). The other original
+// groups have no admin and keep their long-standing stakes below.
+function isSelfServiceGroup(group: GroupLike): boolean {
+  return !!group?.selfService;
+}
+
+// The original groups' stakes predate per-group rules: Fairweathermen plays £5,
+// everyone else £10, and Rovers splits the pot on an all-out. Their older
+// competitions never recorded a stake, so these keep that P/L exactly as it
+// always read; competitions opened since record their own (stakeGbp).
+
+// Rovers' legacy split-on-all-out only covers competitions from before per-group
+// rules, which never recorded a stake; newer ones follow the saved all-out rule.
+function isLegacySplitCompetition(comp: any, rules: LmsRuleSet): boolean {
+  const stake = comp?.stakeGbp ?? comp?.stake_gbp;
+  return rules.legacySplitFinalRound && (stake === null || stake === undefined);
+}
+
+function lmsRulesForGroup(group: GroupLike): LmsRuleSet {
+  const lms = resolveGroupRules(group?.rules).lms;
+  const split = isRoversGroup(group);
+  const legacyStake = isFairweathermen(group) ? 5 : 10;
+  return {
+    lives: lms.lives,
+    deadlineMinutesBeforeKickoff: lms.deadlineMinutesBeforeKickoff,
+    missedPickPolicy: lms.missedPickPolicy,
+    entryFeeGbp: isSelfServiceGroup(group) ? lms.buyIn : legacyStake,
+    // A group with an admin plays exactly what its saved rules say (Rovers included:
+    // its old split-on-all-out only applies to its legacy competitions, below).
+    allOutPolicy: isSelfServiceGroup(group) ? lms.allOutPolicy : split ? "co_winners" : "rollover",
+    legacySplitFinalRound: split,
+    legacyEntryFeeGbp: legacyStake,
+  };
 }
 
 // The stake can change from one season to the next. Fairweathermen played £10
-// per competition in 2024/2025 then dropped to £5; every other group is a flat
-// £10. Both are covered by using £10 for 2024/2025 and the group's current
-// stake for anything after.
-function entryFeeForSeason(season: string | null | undefined, currentEntryFee: number): number {
-  return (season || "2025/2026") === "2024/2025" ? 10 : currentEntryFee;
+// per competition in 2024/2025 then dropped to £5; every other original group
+// is a flat £10. Both are covered by using £10 for 2024/2025 and the group's
+// legacy stake for anything after.
+function entryFeeForSeason(season: string | null | undefined, legacyEntryFee: number): number {
+  return (season || "2025/2026") === "2024/2025" ? 10 : legacyEntryFee;
+}
+
+// One competition's stake: the buy-in it recorded when it opened (so a later
+// rule change never rewrites a finished competition), or for the original
+// groups' older competitions, which recorded none, their per-season stake.
+function entryFeeForCompetition(comp: any, rules: LmsRuleSet): number {
+  const stored = comp?.stakeGbp ?? comp?.stake_gbp;
+  if (typeof stored === "number") return stored;
+  return entryFeeForSeason(comp?.season, rules.legacyEntryFeeGbp);
 }
 
 type CompPrize = { entryFee: number; prizePool: number; numWinners: number; winnerShare: number };
+
+// The user ids of everyone who won a competition. A single winner is stored in
+// winnerId. A shared win (the "co_winners" all-out rule) stores two of the
+// players in winnerId + coWinnerId, but it belongs to everyone knocked out in
+// that same final gameweek, however many there were (e.g. 10 of 100 going out
+// together all split it), so the full list is read back from the participants.
+// Stored ids are user ids; some old rows hold participant ids, so both match.
+function competitionWinnerUserIds(comp: any): number[] {
+  const winnerId = comp?.winner_id ?? comp?.winnerId ?? null;
+  const coWinnerId = comp?.co_winner_id ?? comp?.coWinnerId ?? null;
+  const participants: any[] = comp?.participants ?? [];
+  const resolve = (id: number) =>
+    participants.find((p) => p.userId === id) ?? participants.find((p) => p.id === id);
+  const toUserId = (id: number) => resolve(id)?.userId ?? id;
+  if (!winnerId) return [];
+  if (!coWinnerId) return [toUserId(winnerId)];
+  const ids = new Set<number>([toUserId(winnerId), toUserId(coWinnerId)]);
+  const elimRound = (p: any) => p?.eliminatedInRound ?? p?.eliminated_in_round ?? null;
+  const finalRound = elimRound(resolve(winnerId));
+  if (finalRound != null) {
+    for (const p of participants) if (elimRound(p) === finalRound) ids.add(p.userId);
+  }
+  return Array.from(ids);
+}
 
 // Work out each completed competition's actual prize, accounting for stakes
 // that rolled over from earlier all-out (winnerless) competitions. When a
 // competition ends with no winner the pot isn't lost — it carries forward, so a
 // later winner collects everything banked since the last payout (this is how
-// Sam took the 4× pot after C3–C5 all rolled over). Rollovers never cross a
-// season boundary, and the stake is resolved per season. Returns a map keyed by
-// competition id; callers pass every completed competition so the running total
-// is correct regardless of which one they're rendering.
+// Sam took the 4× pot after C3–C5 all rolled over).
+// Rollovers never cross a season boundary, and the stake is resolved per
+// competition. Returns a map keyed by competition id; callers pass every
+// completed competition so the running total is correct regardless of which one
+// they're rendering.
 function computeCompetitionPrizes(
   completedComps: { id: number; season?: string | null; participants: any[] }[],
-  currentEntryFee: number,
+  rules: LmsRuleSet,
 ): Map<number, CompPrize> {
   const result = new Map<number, CompPrize>();
   const ordered = [...completedComps].sort((a, b) => a.id - b.id);
@@ -276,11 +399,9 @@ function computeCompetitionPrizes(
       rolloverPot = 0;
       rolloverSeason = season;
     }
-    const entryFee = entryFeeForSeason(season, currentEntryFee);
+    const entryFee = entryFeeForCompetition(comp, rules);
     const compPot = entryFee * comp.participants.length;
-    const winnerId = (comp as any)?.winner_id || (comp as any)?.winnerId;
-    const coWinnerId = (comp as any)?.co_winner_id || (comp as any)?.coWinnerId;
-    const numWinners = (winnerId ? 1 : 0) + (coWinnerId ? 1 : 0);
+    const numWinners = competitionWinnerUserIds(comp).length;
     const prizePool = compPot + rolloverPot;
     const winnerShare = numWinners > 0 ? prizePool / numWinners : 0;
     rolloverPot = numWinners > 0 ? 0 : rolloverPot + compPot;
@@ -391,42 +512,39 @@ function NextDeadlineBanner({
   // Hide the banner once the deadline has passed — gameweek is mid-flight
   if (diffMs <= 0) return null;
 
-  let countdown: string;
-  let locked = false;
-  if (diffMs <= 0) {
-    locked = true;
-    countdown = "Selections locked";
-  } else {
-    const totalMin = Math.floor(diffMs / 60000);
-    const days = Math.floor(totalMin / (60 * 24));
-    const hours = Math.floor((totalMin % (60 * 24)) / 60);
-    const mins = totalMin % 60;
-    const parts: string[] = [];
-    if (days > 0) parts.push(`${days}d`);
-    if (hours > 0 || days > 0) parts.push(`${hours}h`);
-    parts.push(`${mins}m`);
-    countdown = `in ${parts.join(" ")}`;
-  }
+  // Countdown split into tiles. The deadline banner is hidden once it has
+  // passed (above), so this only ever counts down.
+  const totalMin = Math.floor(diffMs / 60000);
+  const tiles = [
+    { value: Math.floor(totalMin / (60 * 24)), unit: "days" },
+    { value: Math.floor((totalMin % (60 * 24)) / 60), unit: "hours" },
+    { value: totalMin % 60, unit: "mins" },
+  ];
+  const urgent = diffMs < 24 * 60 * 60 * 1000;
 
   return (
-    <Card
-      className={
-        locked
-          ? "border-l-4 border-l-red-500 bg-red-50 dark:bg-red-950/30"
-          : diffMs < 24 * 60 * 60 * 1000
-            ? "border-l-4 border-l-amber-500 bg-amber-50 dark:bg-amber-950/30"
-            : "border-l-4 border-l-blue-500 bg-blue-50 dark:bg-blue-950/30"
-      }
-    >
-      <CardContent className="py-3 px-4 flex items-center gap-3">
-        <Calendar className="h-5 w-5 flex-shrink-0" />
-        <div className="flex-1 min-w-0">
-          <div className="text-xs uppercase tracking-wide text-gray-600 dark:text-gray-400 font-semibold">
-            GW{gameweek} {locked ? "Deadline passed" : "Deadline"}
-          </div>
-          <div className="text-sm font-medium">
-            {deadlineLabel} <span className="text-gray-600 dark:text-gray-400">({countdown})</span>
-          </div>
+    <Card>
+      <CardContent className="p-4">
+        <div className="flex items-baseline justify-between gap-3">
+          <div className={`eyebrow ${urgent ? "text-amber-700" : ""}`}>GW{gameweek} deadline</div>
+          <div className="text-[13px] text-muted-foreground tabular-nums">{deadlineLabel}</div>
+        </div>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          {tiles.map((t) => (
+            <div
+              key={t.unit}
+              className={`rounded-xl py-2.5 text-center ${urgent ? "bg-amber-50" : "bg-muted"}`}
+            >
+              <div
+                className={`font-display text-[30px] font-bold leading-none tabular-nums ${
+                  urgent ? "text-amber-700" : ""
+                }`}
+              >
+                {t.unit === "days" ? t.value : String(t.value).padStart(2, "0")}
+              </div>
+              <div className="mt-1 text-[11px] text-muted-foreground">{t.unit}</div>
+            </div>
+          ))}
         </div>
       </CardContent>
     </Card>
@@ -512,6 +630,8 @@ const FixturesGridContent = memo(({
   const handleTouchStart = (teamId: number) => {
     const timer = setTimeout(() => {
       toggleTeamVisibility(teamId);
+      const team = teams?.find((t) => t.id === teamId);
+      trackUiEvent("fixture_select", { team: team?.shortName ?? team?.name ?? String(teamId), hidden: !hiddenTeams.has(teamId) });
     }, 800);
     setLongPressTimer(timer);
   };
@@ -557,16 +677,16 @@ const FixturesGridContent = memo(({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+          <p className="text-sm text-gray-600 mb-4">
             The {LMS_NEXT_SEASON_LABEL} Premier League fixtures haven't been
             announced yet. The 20 teams in the league are listed below — full
             fixtures will appear here once published.
           </p>
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse border border-gray-300 text-xs sm:text-sm">
+          <div className={GRID_WRAP}>
+            <table className={GRID_TABLE}>
               <thead>
                 <tr>
-                  <th className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-2 text-left font-semibold">
+                  <th className={GRID_TH_FIRST}>
                     Team
                   </th>
                 </tr>
@@ -576,7 +696,7 @@ const FixturesGridContent = memo(({
                   .sort((a, b) => a.localeCompare(b))
                   .map((name) => (
                     <tr key={name}>
-                      <td className="border border-gray-300 p-2 font-medium">
+                      <td className={GRID_TD_FIRST}>
                         {getFixturesTeamName(name)}
                       </td>
                     </tr>
@@ -590,28 +710,52 @@ const FixturesGridContent = memo(({
   }
 
   // Window the preview on the fixtures themselves, not the LMS competition's
-  // gameweek pointer — that pointer trails the *previous* season (e.g. GW38)
-  // until a new competition is started, which is why this used to show the
-  // wrong, already-played gameweek. Start at the earliest gameweek that still
-  // has an unplayed match (GW1 for a freshly imported season); if the whole
-  // season is done, fall back to the last gameweek so the grid isn't empty.
-  const isPlayed = (m: (typeof matches)[number]) =>
-    m.status === "finished" || (m.homeScore != null && m.awayScore != null);
-  const allGWs = matches
-    .map((m) => m.gameweek)
-    .filter((gw): gw is number => gw != null);
-  const unplayedGWs = matches
-    .filter((m) => m.gameweek != null && !isPlayed(m))
-    .map((m) => m.gameweek!);
-  const currentGW = unplayedGWs.length
-    ? Math.min(...unplayedGWs)
-    : allGWs.length
-      ? Math.max(...allGWs)
-      : 1;
+  // gameweek pointer (which can trail the previous season). And go by kick-off
+  // times rather than which matches have results: keying it off results rewound
+  // the grid to stale gameweeks whenever some results were missing (e.g. GW4
+  // while the season was mid-GW8).
+  //
+  // The current gameweek is the latest one that has kicked off, while it's still
+  // being played — a match of it is in progress, kicked off in the last few
+  // hours, or is still to come within a week of its first kick-off (so a
+  // postponed match rearranged for months later doesn't hold the grid back).
+  // Otherwise it's the next gameweek to start; if the whole season is done, the
+  // last gameweek, so the grid isn't empty.
+  const HOURS = 60 * 60 * 1000;
+  const firstKickoffByGw = new Map<number, number>();
+  for (const m of matches) {
+    if (m.gameweek == null) continue;
+    const ko = londonStringToUtcMs(m.matchTime);
+    if (Number.isNaN(ko)) continue;
+    const cur = firstKickoffByGw.get(m.gameweek);
+    if (cur == null || ko < cur) firstKickoffByGw.set(m.gameweek, ko);
+  }
+  const allGWs = Array.from(firstKickoffByGw.keys());
+  const startedGWs = allGWs.filter((gw) => firstKickoffByGw.get(gw)! <= nowMs);
+  const upcomingGWs = allGWs.filter((gw) => firstKickoffByGw.get(gw)! > nowMs);
+  const latestStarted = startedGWs.length ? Math.max(...startedGWs) : null;
+  const stillBeingPlayed = (gw: number) => {
+    const first = firstKickoffByGw.get(gw)!;
+    return matches.some((m) => {
+      if (m.gameweek !== gw || m.status === "finished") return false;
+      if (m.status === "in_progress") return true;
+      const ko = londonStringToUtcMs(m.matchTime);
+      if (Number.isNaN(ko)) return false;
+      return ko > nowMs - 3 * HOURS && ko <= first + 7 * 24 * HOURS;
+    });
+  };
+  const currentGW =
+    latestStarted != null && stillBeingPlayed(latestStarted)
+      ? latestStarted
+      : upcomingGWs.length
+        ? Math.min(...upcomingGWs)
+        : allGWs.length
+          ? Math.max(...allGWs)
+          : 1;
   const gameweeksToShow = Array.from({ length: 5 }, (_, i) => currentGW + i).filter(gw => gw <= 38);
 
   // Group matches by gameweek and team
-  const fixturesByTeam: Record<number, Record<number, { opponent: string; isHome: boolean }>> = {};
+  const fixturesByTeam: Record<number, Record<number, { opponent: string; opponentTeam?: Team; isHome: boolean }>> = {};
   
   teams.forEach(team => {
     fixturesByTeam[team.id] = {};
@@ -627,6 +771,7 @@ const FixturesGridContent = memo(({
       if (homeTeamId !== null && fixturesByTeam[homeTeamId]) {
         fixturesByTeam[homeTeamId][gameweek] = {
           opponent: match.awayTeam?.shortName || match.awayTeam?.name.substring(0, 3).toUpperCase() || 'TBD',
+          opponentTeam: match.awayTeam ?? undefined,
           isHome: true
         };
       }
@@ -634,6 +779,7 @@ const FixturesGridContent = memo(({
       if (awayTeamId !== null && fixturesByTeam[awayTeamId]) {
         fixturesByTeam[awayTeamId][gameweek] = {
           opponent: match.homeTeam?.shortName || match.homeTeam?.name.substring(0, 3).toUpperCase() || 'TBD',
+          opponentTeam: match.homeTeam ?? undefined,
           isHome: false
         };
       }
@@ -664,19 +810,19 @@ const FixturesGridContent = memo(({
               <div className="space-y-4">
                 <div className="space-y-2">
                   <h4 className="font-medium text-sm">Click to Highlight</h4>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                  <p className="text-sm text-gray-600">
                     Click any fixture cell to highlight it. This helps you plan potential picks. Click again to remove the highlight.
                   </p>
                 </div>
                 <div className="space-y-2">
                   <h4 className="font-medium text-sm">Tap & Hold to Hide Rows</h4>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                  <p className="text-sm text-gray-600">
                     Tap and hold any team name to hide that team's row. This removes teams you're not interested in for a cleaner view.
                   </p>
                 </div>
                 <div className="space-y-2">
                   <h4 className="font-medium text-sm">Temporary Changes</h4>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                  <p className="text-sm text-gray-600">
                     These changes are temporary and will reset when you refresh the page.
                   </p>
                 </div>
@@ -686,15 +832,13 @@ const FixturesGridContent = memo(({
         </div>
       </CardHeader>
       <CardContent>
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse border border-gray-300 text-xs">
+        <div className={GRID_WRAP}>
+          <table className={GRID_TABLE}>
             <thead>
               <tr>
-                <th className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-1 text-left font-semibold w-16 sm:w-24 text-xs sm:text-sm">
-                  Team
-                </th>
+                <th className={GRID_TH_FIRST}>Team</th>
                 {gameweeksToShow.map(gw => (
-                  <th key={gw} className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-1 text-center font-semibold w-16 sm:w-18 text-xs sm:text-sm">
+                  <th key={gw} className={`${GRID_TH} min-w-[72px] ${gw === currentGW ? "!text-primary" : ""}`}>
                     GW{gw}
                   </th>
                 ))}
@@ -713,9 +857,9 @@ const FixturesGridContent = memo(({
                   .filter(team => !hiddenTeams.has(team.id));
               })().map(team => (
                   <tr key={team.id}>
-                    <td className="border border-gray-300 p-1 font-medium text-xs">
-                      <span 
-                        className="block cursor-pointer select-none whitespace-nowrap truncate max-w-[60px] sm:max-w-[80px]"
+                    <td className={GRID_TD_FIRST}>
+                      <span
+                        className="flex cursor-pointer select-none items-center gap-1.5"
                         onTouchStart={(e) => {
                           e.preventDefault();
                           handleTouchStart(team.id);
@@ -727,29 +871,46 @@ const FixturesGridContent = memo(({
                         onMouseLeave={handleTouchEnd}
                         title={`${team.name} - Hold to hide this team row`}
                       >
-                        {getFixturesTeamName(team.name)}
+                        <TeamCrest team={team} size={18} transparent />
+                        <span className="max-w-[72px] truncate sm:max-w-none">{getFixturesTeamName(team.name)}</span>
                       </span>
                     </td>
                     {gameweeksToShow.map(gw => {
                       const fixture = fixturesByTeam[team.id][gw];
                       const cellKey = `${team.id}-${gw}`;
                       const isHighlighted = highlightedCells.has(cellKey);
-                      
+
                       return (
-                        <td key={gw} className="border border-gray-300 p-0.5 text-center">
+                        <td key={gw} className="border-b border-border/70 p-1 text-center align-middle">
                           {fixture ? (
-                            <div 
-                              className={`text-[9px] sm:text-[10px] p-0.5 rounded leading-tight cursor-pointer transition-colors duration-200 whitespace-nowrap ${
-                                isHighlighted 
-                                  ? 'bg-yellow-300 dark:bg-yellow-600 text-black dark:text-white' 
-                                  : 'bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'
+                            <button
+                              type="button"
+                              className={`mx-auto flex h-9 w-16 items-center justify-center gap-1 rounded-lg text-[11px] font-semibold ring-1 ring-inset transition-colors ${
+                                isHighlighted
+                                  ? 'bg-secondary text-primary ring-secondary'
+                                  : fixture.isHome
+                                  ? 'bg-muted text-foreground ring-transparent hover:ring-border'
+                                  : 'bg-card text-muted-foreground ring-border hover:bg-muted/60'
                               }`}
-                              onClick={() => toggleCellHighlight(team.id, gw)}
+                              onClick={() => {
+                                toggleCellHighlight(team.id, gw);
+                                trackUiEvent("fixture_select", {
+                                  team: team.shortName ?? team.name,
+                                  opponent: fixture.opponent,
+                                  home: fixture.isHome,
+                                  gameweek: gw,
+                                  on: !isHighlighted,
+                                });
+                              }}
+                              aria-pressed={isHighlighted}
+                              title={`${fixture.isHome ? 'Home' : 'Away'} vs ${fixture.opponentTeam?.name ?? fixture.opponent}`}
                             >
-                              {fixture.opponent} ({fixture.isHome ? 'H' : 'A'})
-                            </div>
+                              {fixture.opponentTeam && <TeamCrest team={fixture.opponentTeam} size={14} transparent />}
+                              <span>{fixture.opponent}</span>
+                              <span className="text-[9px] font-medium opacity-70">{fixture.isHome ? 'H' : 'A'}</span>
+                            </button>
                           ) : (
-                            <div className="text-[9px] sm:text-[10px] text-gray-400">-</div>
+                            <div className="text-muted-foreground/60">–</div>
                           )}
                         </td>
                       );
@@ -759,6 +920,11 @@ const FixturesGridContent = memo(({
             </tbody>
           </table>
         </div>
+        <p className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+          <span className="flex items-center gap-1.5"><span className="h-3 w-5 rounded bg-muted" /> Home</span>
+          <span className="flex items-center gap-1.5"><span className="h-3 w-5 rounded bg-card ring-1 ring-inset ring-border" /> Away</span>
+          <span className="flex items-center gap-1.5"><span className="h-3 w-5 rounded bg-secondary" /> Tap to highlight</span>
+        </p>
       </CardContent>
     </Card>
   );
@@ -776,7 +942,7 @@ export default function LastManStandingPage() {
   const [isHelpDialogOpen, setIsHelpDialogOpen] = useState(false);
   const queryClient = useQueryClient();
   const { group, user } = useGroup();
-  const lmsRules = rulesForGroup(group);
+  const lmsRules = useMemo(() => lmsRulesForGroup(group), [group]);
 
   // The logged-in user (from their personal login code). Used to restrict
   // editing so each player can only change their own selections.
@@ -814,11 +980,10 @@ export default function LastManStandingPage() {
   });
 
   // Fetch current competition. Server returns 200 + null when this group has
-  // no competition yet (e.g. a brand-new LMS group like "lastman").
-  // Polling is disabled entirely once we know there's no competition — there's
-  // nothing live to keep in sync and any refetch was visibly re-rendering the
-  // page. New comps in this state need a manual refresh to appear, which is
-  // fine for the "waiting until next season" scenario.
+  // no competition yet. Competitions open themselves (see server/lmsAutoStart),
+  // so with no competition we still check back once a minute — slow enough not
+  // to churn the page (an unchanged null doesn't re-render), quick enough that a
+  // freshly opened competition shows up without a manual refresh.
   const { data: currentCompetition, isLoading: competitionLoading } = useQuery<
     CompetitionWithDetails | null
   >({
@@ -828,7 +993,7 @@ export default function LastManStandingPage() {
       if (!response.ok) throw new Error("Failed to fetch competition");
       return response.json();
     },
-    refetchInterval: (q) => (q.state.data ? 5000 : false),
+    refetchInterval: (q) => (q.state.data ? 5000 : 60_000),
     staleTime: 5000,
   });
 
@@ -891,10 +1056,28 @@ export default function LastManStandingPage() {
   const prizeByComp = useMemo(
     () => computeCompetitionPrizes(
       (historicalCompetitions || []).filter(c => c.status === "completed"),
-      lmsRules.entryFeeGbp,
+      lmsRules,
     ),
-    [historicalCompetitions, lmsRules.entryFeeGbp],
+    [historicalCompetitions, lmsRules],
   );
+
+  // Whether the current season still has a match to come. With none, it's the
+  // genuine off-season (the next competition waits for next season's GW1).
+  const hasUpcomingFixtures = (() => {
+    const now = Date.now();
+    return (allMatches ?? []).some((m) => {
+      const kickoff = m.matchTime ? londonStringToUtcMs(m.matchTime) : NaN;
+      return !Number.isNaN(kickoff) && kickoff > now;
+    });
+  })();
+
+  // An open competition whose gameweek has no fixtures loaded yet — e.g. waiting
+  // on a new season's fixture list. Treated as "has fixtures" until the matches
+  // have loaded, so the picker doesn't flash away on first render.
+  const competitionGameweek =
+    (currentCompetition as any)?.current_gameweek || currentCompetition?.currentGameweek || 1;
+  const currentGameweekHasFixtures =
+    allMatches === undefined || allMatches.some((m) => m.gameweek === competitionGameweek);
 
   // Derive available seasons (sorted desc — newest first) from competitions
   const availableSeasons = (() => {
@@ -1053,17 +1236,22 @@ export default function LastManStandingPage() {
   const getStatusBadge = (participant: LmsParticipant & { user: User; selections: LmsSelection[] }, competition?: CompetitionWithDetails) => {
     // Check if this participant is the winner of this competition (handle both snake_case and camelCase)
     const winnerId = (competition as any)?.winner_id || competition?.winnerId;
-
-    
-    if (winnerId === participant.userId) {
-      return <Badge variant="default" className="bg-yellow-500 text-black">Winner</Badge>;
+    // Joint winners (the "co_winners" all-out rule): everyone who went out in
+    // the final gameweek gets the co-winner badge.
+    const winnerIds = competitionWinnerUserIds(competition);
+    if (winnerIds.includes(participant.userId)) {
+      return (
+        <Badge variant="default" className="bg-yellow-500 text-black">
+          {winnerIds.length > 1 ? "Co-winner" : "Winner"}
+        </Badge>
+      );
     }
 
     // Split-on-all-out groups (e.g. Rovers): a completed competition with no single
     // winner means everyone remaining went out together — the players eliminated
     // in the final round are joint winners.
     const status = (competition as any)?.status;
-    if (status === "completed" && !winnerId && lmsRules.allOutBehaviour === "split_final_round" && competition) {
+    if (status === "completed" && !winnerId && competition && isLegacySplitCompetition(competition, lmsRules)) {
       const elimRound = (p: any) => p.eliminatedInRound ?? (p as any).eliminated_in_round ?? 0;
       const parts = (competition as any).participants ?? [];
       const maxRound = parts.reduce((m: number, p: any) => Math.max(m, elimRound(p)), 0);
@@ -1093,8 +1281,8 @@ export default function LastManStandingPage() {
     return (
       <div className="min-h-screen bg-background">
         <Header />
-        <main className="container mx-auto px-4 py-8">
-          <div className="space-y-6">
+        <main className="container mx-auto max-w-5xl px-4 py-4 sm:py-8">
+          <div className="space-y-4 sm:space-y-6">
             <Skeleton className="h-32 w-full" />
             <Skeleton className="h-64 w-full" />
           </div>
@@ -1106,9 +1294,8 @@ export default function LastManStandingPage() {
   return (
     <div className="min-h-screen bg-background">
       <Header />
-      <main className="container mx-auto px-4 py-8">
-        <div className="space-y-6">
-
+      <main className="container mx-auto max-w-5xl px-4 py-4 sm:py-8">
+        <div className="space-y-4 sm:space-y-6">
 
           {/* Hide History + Stats tabs until at least one gameweek has actually
               been played. For brand-new LMS groups (e.g. lastman before next
@@ -1153,22 +1340,53 @@ export default function LastManStandingPage() {
               <TabsTrigger value="rules" className="text-xs sm:text-sm">Rules</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="current" className="space-y-6">
+            <TabsContent value="current" className="space-y-4">
               {!currentCompetition && (
+                <Card>
+                  <CardContent className="py-12 text-center">
+                    {allMatches === undefined ? (
+                      <Skeleton className="mx-auto h-10 w-64" />
+                    ) : hasUpcomingFixtures ? (
+                      // Competitions open themselves (on group creation, when the
+                      // last one ends, and at a new season's GW1), so with fixtures
+                      // still to play this is only ever a brief gap.
+                      <>
+                        <p className="text-base font-medium text-gray-700">
+                          Your competition is being set up
+                        </p>
+                        <p className="mt-2 text-sm text-gray-500">
+                          It starts with the next gameweek. Check back shortly.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-base font-medium text-gray-700">
+                          Coming soon
+                        </p>
+                        <p className="mt-2 text-sm text-gray-500">
+                          The next Last Man Standing competition starts with GW1 of
+                          the new season. Check back in August once the new Premier
+                          League season's fixtures are out.
+                        </p>
+                      </>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+              {currentCompetition && currentCompetition.status === "active" && !currentGameweekHasFixtures && (
                 <Card>
                   <CardContent className="py-12 text-center">
                     <p className="text-base font-medium text-gray-700">
                       Coming soon
                     </p>
                     <p className="mt-2 text-sm text-gray-500">
-                      The next Last Man Standing competition hasn't been set up
-                      yet. Check back in August once the new Premier League
-                      season's fixtures are out.
+                      The next competition starts with GW1 of the new season once
+                      the fixtures are out.
                     </p>
                   </CardContent>
                 </Card>
               )}
-              {currentCompetition && (
+              {currentCompetition && (currentCompetition.status !== "active" || currentGameweekHasFixtures) && (
                 <>
                   {currentCompetition.status === "active" && allMatches && (
                     <NextDeadlineBanner
@@ -1197,11 +1415,13 @@ export default function LastManStandingPage() {
                       (s) => s.gameweek === gameweek,
                     );
                     // Teams used in OTHER gameweeks are unavailable; the current
-                    // gameweek's pick stays selectable so it can be changed.
+                    // gameweek's pick stays selectable so it can be changed. A
+                    // missed-pick row (no team) doesn't use a team up.
                     const usedTeamIds = new Set(
                       myParticipant.selections
                         .filter((s) => s.gameweek !== gameweek)
-                        .map((s) => s.teamId),
+                        .map((s) => s.teamId)
+                        .filter((id): id is number => id != null),
                     );
                     const gwMatches = (allMatches ?? []).filter(
                       (m) => m.gameweek === gameweek && m.matchTime,
@@ -1210,43 +1430,45 @@ export default function LastManStandingPage() {
                     const myTeam = mySelection
                       ? allTeams?.find((t) => t.id === mySelection.teamId)
                       : undefined;
+                    // Missed the deadline: the drawn team stays hidden until the
+                    // randomiser wheel above lands on it.
+                    const myPickOnWheel = (mySelection as any)?.wheel === true;
 
                     return (
                       <>
-                        <Card>
-                          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4">
-                            <div className="flex items-center gap-3">
-                              {myTeam ? (
-                                <TeamCrest team={myTeam} size={44} />
-                              ) : (
-                                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border-2 border-dashed border-gray-300 text-gray-300">
-                                  ?
-                                </span>
-                              )}
-                              <div>
-                                <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                                  Your GW{gameweek} pick
-                                </p>
-                                <p className="text-lg font-bold">
-                                  {myTeam ? myTeam.name : locked ? "No pick" : "Not picked yet"}
-                                </p>
-                              </div>
+                        <div className="rounded-2xl bg-primary p-4 text-white shadow-card">
+                          <div className="flex items-center gap-3.5">
+                            {myTeam ? (
+                              <span className="flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-full bg-white">
+                                <TeamCrest team={myTeam} size={40} />
+                              </span>
+                            ) : (
+                              <span className="flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-full border-2 border-dashed border-white/35 text-xl font-semibold text-white/60">
+                                {myPickOnWheel ? <span role="img" aria-hidden>🎡</span> : "?"}
+                              </span>
+                            )}
+                            <div className="min-w-0">
+                              <p className="eyebrow text-white/65">Your GW{gameweek} pick</p>
+                              <p className="font-display truncate text-[26px] font-bold leading-tight">
+                                {myTeam ? myTeam.name : myPickOnWheel ? "Down to the wheel" : locked ? "No pick" : "Not picked yet"}
+                              </p>
                             </div>
-                            <Button
-                              disabled={locked}
-                              onClick={() => setPickerOpen(true)}
-                            >
-                              {locked ? "Locked" : mySelection ? "Change pick" : "Make your pick"}
-                            </Button>
-                          </CardContent>
-                        </Card>
+                          </div>
+                          <Button
+                            disabled={locked}
+                            onClick={() => setPickerOpen(true)}
+                            className="mt-4 h-12 w-full sm:w-auto sm:px-10 rounded-xl bg-secondary text-[15px] font-bold text-primary hover:bg-secondary/90 disabled:bg-white/15 disabled:text-white/60 disabled:opacity-100"
+                          >
+                            {locked ? "Locked" : mySelection ? "Change pick" : "Make your pick"}
+                          </Button>
+                        </div>
                         <TeamPickerDialog
                           open={pickerOpen}
                           onOpenChange={setPickerOpen}
                           gameweek={gameweek}
                           matches={gwMatches}
                           usedTeamIds={usedTeamIds}
-                          currentTeamId={mySelection?.teamId}
+                          currentTeamId={mySelection?.teamId ?? undefined}
                           locked={locked}
                           busy={selectTeamMutation.isPending || removeSelectionMutation.isPending}
                           onPick={(teamId) =>
@@ -1270,14 +1492,14 @@ export default function LastManStandingPage() {
                   {/* Excel-Style Selection Table */}
                   <Card>
                     <CardHeader>
-                      <CardTitle className="text-lg sm:text-xl">Team Selections</CardTitle>
+                      <CardTitle className="text-lg sm:text-xl">Team selections</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <div ref={scrollGridToLatest} className="overflow-x-auto" data-testid="lms-selections-grid">
-                        <table className="w-full border-collapse border border-gray-300 text-xs sm:text-sm">
+                      <div ref={scrollGridToLatest} className={GRID_WRAP} data-testid="lms-selections-grid">
+                        <table className={GRID_TABLE}>
                           <thead>
                             <tr>
-                              <th className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-1 text-left font-semibold w-14 sm:w-20">
+                              <th className={GRID_TH_FIRST}>
                                 Player
                               </th>
                               {(() => {
@@ -1286,7 +1508,10 @@ export default function LastManStandingPage() {
                                 const numWeeks = currentGW - startGW + 1;
 
                                 return Array.from({ length: numWeeks }, (_, i) => (
-                                  <th key={`gw-${startGW + i}`} className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-1 text-center font-semibold w-14 sm:w-20">
+                                  <th
+                                    key={`gw-${startGW + i}`}
+                                    className={`${GRID_TH} min-w-[64px] ${startGW + i === currentGW ? "!text-primary" : ""}`}
+                                  >
                                     GW{startGW + i}
                                   </th>
                                 ));
@@ -1298,8 +1523,8 @@ export default function LastManStandingPage() {
                               .sort((a, b) => (a.user?.username || '').localeCompare(b.user?.username || ''))
                               .map((participant) => (
                               <tr key={participant.id}>
-                                <td className="border border-gray-300 px-1 py-0.5 font-medium bg-gray-50 dark:bg-gray-900 text-xs sm:text-sm">
-                                  <span className="truncate block max-w-[60px] sm:max-w-none">
+                                <td className={GRID_TD_FIRST}>
+                                  <span className="block max-w-[84px] truncate sm:max-w-none">
                                     {participant.user?.username || 'Unknown User'}
                                   </span>
                                 </td>
@@ -1314,9 +1539,10 @@ export default function LastManStandingPage() {
                                     // (server-redacted) until the gameweek locks — the
                                     // selection carries hidden:true with no teamId.
                                     const isHidden = !!selection && (selection as any).hidden === true;
-                                    const isOut = isOutBeforeGameweek(participant, gameweek);
-                                    const team = selection && !isHidden ? allTeams?.find(t => t.id === selection.teamId) : undefined;
-                                    const opponent = selection && !isHidden ? opponentFor(allMatches, selection.teamId, gameweek) : null;
+                                    const isOut = isOutBeforeGameweek(participant, gameweek, lmsRules.lives);
+                                    const teamId = selection && !isHidden ? selection.teamId : null;
+                                    const team = teamId != null ? allTeams?.find(t => t.id === teamId) : undefined;
+                                    const opponent = teamId != null ? opponentFor(allMatches, teamId, gameweek) : null;
                                     return (
                                       <LmsSelectionCell
                                         key={`cell-${gameweek}`}
@@ -1387,7 +1613,7 @@ export default function LastManStandingPage() {
 
               {/* Competition Details */}
               {selectedHistoryCompetitionId && selectedHistoryCompetitionId !== "none" && (
-                <div className="space-y-6">
+                <div className="space-y-4 sm:space-y-6">
                   {historyLoading ? (
                     <Skeleton className="h-64 w-full" />
                   ) : (
@@ -1417,25 +1643,24 @@ export default function LastManStandingPage() {
                                   )}
                                 </div>
                                 {(() => {
-                                  const winnerId = (competition as any)?.winner_id || competition?.winnerId;
-                                  const coWinnerId = (competition as any)?.co_winner_id || (competition as any)?.coWinnerId;
-                                  if (winnerId) {
-                                    const winner = competition.participants.find(p => p.id === winnerId) || competition.participants.find(p => p.userId === winnerId);
-                                    const coWinner = coWinnerId ? (competition.participants.find(p => p.id === coWinnerId) || competition.participants.find(p => p.userId === coWinnerId)) : null;
-                                    const winnerName = winner ? (winner.user?.username || `Unknown User (${winner.userId})`) : undefined;
-                                    const coWinnerName = coWinner ? (coWinner.user?.username || `Unknown User (${coWinner.userId})`) : undefined;
+                                  const winnerIds = competitionWinnerUserIds(competition);
+                                  if (winnerIds.length > 0) {
+                                    const names = winnerIds.map((id) => {
+                                      const p = competition.participants.find(pp => pp.userId === id);
+                                      return p?.user?.username || `Unknown User (${id})`;
+                                    });
                                     // Prize is rollover-aware and season-correct (see the shared
                                     // prize map): a win after all-outs takes the accumulated pot,
                                     // not just this competition's stakes.
                                     const prize = prizeByComp.get(competition.id);
-                                    const prizePool = prize?.prizePool ?? lmsRules.entryFeeGbp * competition.participants.length;
-                                    const share = prize?.winnerShare ?? (coWinnerName ? prizePool / 2 : prizePool);
+                                    const prizePool = prize?.prizePool ?? entryFeeForCompetition(competition, lmsRules) * competition.participants.length;
+                                    const share = prize?.winnerShare ?? prizePool / names.length;
                                     const shareLabel = Number.isInteger(share) ? `£${share}` : `£${share.toFixed(2)}`;
                                     return (
                                       <div className="flex items-center gap-2 text-yellow-600">
                                         <Crown className="h-5 w-5" />
                                         <span className="font-medium">
-                                          {coWinnerName ? `${winnerName} & ${coWinnerName} (${shareLabel} each)` : `${winnerName} (${shareLabel})`}
+                                          {names.length > 1 ? `${names.join(" & ")} (${shareLabel} each)` : `${names[0]} (${shareLabel})`}
                                         </span>
                                       </div>
                                     );
@@ -1461,11 +1686,11 @@ export default function LastManStandingPage() {
                                 {/* Final Table State */}
                                 <div className="space-y-4">
                                   <h4 className="font-medium">Final Competition Table</h4>
-                                  <div className="overflow-x-auto">
-                                    <table className="w-full border-collapse border border-gray-300">
+                                  <div ref={scrollGridToLatest} className={GRID_WRAP} data-testid="lms-history-grid">
+                                    <table className={GRID_TABLE}>
                                       <thead>
                                         <tr>
-                                          <th className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-1 text-left font-semibold w-16 sm:w-20">
+                                          <th className={GRID_TH_FIRST}>
                                             Player
                                           </th>
                                           {Array.from({ 
@@ -1473,7 +1698,7 @@ export default function LastManStandingPage() {
                                           }, (_, i) => {
                                             const actualGameweek = ((competition as any).start_gameweek || competition.startGameweek || 1) + i;
                                             return (
-                                              <th key={actualGameweek} className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-1 text-center font-semibold w-14 sm:w-20">
+                                              <th key={actualGameweek} className={`${GRID_TH} min-w-[64px]`}>
                                                 GW{actualGameweek}
                                               </th>
                                             );
@@ -1485,11 +1710,10 @@ export default function LastManStandingPage() {
                                           .sort((a, b) => (a.user?.username || '').localeCompare(b.user?.username || ''))
                                           .map((participant) => (
                                           <tr key={participant.id}>
-                                            <td className="border border-gray-300 px-1 py-0.5 font-medium bg-gray-50 dark:bg-gray-900 text-xs sm:text-sm">
-                                              <div className="flex items-center gap-2">
+                                            <td className={GRID_TD_FIRST}>
+                                              <div className="flex items-center gap-1.5">
                                                 {participant.user?.username || 'Unknown User'}
-                                                {((((competition as any)?.winner_id || competition?.winnerId) === participant.userId) ||
-                                                  (((competition as any)?.co_winner_id || (competition as any)?.coWinnerId) === participant.userId)) && (
+                                                {competitionWinnerUserIds(competition).includes(participant.userId) && (
                                                   <Crown className="h-4 w-4 text-yellow-500" />
                                                 )}
                                               </div>
@@ -1499,13 +1723,15 @@ export default function LastManStandingPage() {
                                             }, (_, gameweekIndex) => {
                                               const gameweek = ((competition as any).start_gameweek || competition.startGameweek || 1) + gameweekIndex;
                                               const selection = participant.selections.find(s => s.gameweek === gameweek);
-                                              const team = selection ? allTeams?.find(t => t.id === selection.teamId) : undefined;
+                                              const teamId = selection?.teamId ?? null;
+                                              const team = teamId != null ? allTeams?.find(t => t.id === teamId) : undefined;
                                               // Resolve by the pick's actual matchId (season-correct, and works
                                               // for teams since relegated); fall back to the season-scoped
                                               // gameweek lookup for old picks that never stored a matchId.
-                                              const opponent = selection
-                                                ? opponentForMatchId(matchesById, (selection as any).matchId, selection.teamId)
-                                                  ?? opponentForSeason(allSeasonMatches, (competition as any).season, selection.teamId, gameweek)
+                                              // A missed-pick row has no team, so no opponent.
+                                              const opponent = teamId != null
+                                                ? opponentForMatchId(matchesById, (selection as any).matchId, teamId)
+                                                  ?? opponentForSeason(allSeasonMatches, (competition as any).season, teamId, gameweek)
                                                 : null;
                                               return (
                                                 <LmsSelectionCell
@@ -1513,7 +1739,7 @@ export default function LastManStandingPage() {
                                                   team={team}
                                                   selection={selection as any}
                                                   opponent={opponent}
-                                                  isOut={isOutBeforeGameweek(participant, gameweek)}
+                                                  isOut={isOutBeforeGameweek(participant, gameweek, lmsRules.lives)}
                                                 />
                                               );
                                             })}
@@ -1583,7 +1809,7 @@ export default function LastManStandingPage() {
                   {historyLoading ? (
                     <Skeleton className="h-64 w-full" />
                   ) : (
-                    <div className="overflow-x-auto">
+                    <div className={GRID_WRAP}>
                       {(() => {
                         const seasonFilter = (c: any) => selectedStatsSeason === "combined" || (c.season || "2025/2026") === selectedStatsSeason;
                         const completedComps = (historicalCompetitions?.filter(c => c.status === "completed") || [])
@@ -1592,14 +1818,13 @@ export default function LastManStandingPage() {
                         const allPlayers = new Map<number, { username: string; pl: Map<string, number>; total: number }>();
 
                         completedComps.forEach(comp => {
-                          const winnerId = (comp as any)?.winner_id || comp?.winnerId;
-                          const coWinnerId = (comp as any)?.co_winner_id || (comp as any)?.coWinnerId;
+                          const winnerIds = competitionWinnerUserIds(comp);
                           // Stake and prize (rollover-aware) come from the shared prize map so
                           // the P/L table, the history winner line and the completed banner all
                           // agree. A winner collects this competition's pot plus anything rolled
                           // over from earlier all-out competitions; everyone still pays the stake.
                           const prize = prizeByComp.get(comp.id);
-                          const entryFee = prize?.entryFee ?? entryFeeForSeason((comp as any).season, lmsRules.entryFeeGbp);
+                          const entryFee = prize?.entryFee ?? entryFeeForCompetition(comp, lmsRules);
                           const winnerShare = prize?.winnerShare ?? 0;
                           comp.participants.forEach(p => {
                             if (!allPlayers.has(p.userId)) {
@@ -1611,9 +1836,7 @@ export default function LastManStandingPage() {
                             }
                             const player = allPlayers.get(p.userId)!;
                             let pl = -entryFee;
-                            const isWinner = winnerId === p.id || winnerId === p.userId;
-                            const isCoWinner = coWinnerId && (coWinnerId === p.id || coWinnerId === p.userId);
-                            if (isWinner || isCoWinner) {
+                            if (winnerIds.includes(p.userId)) {
                               pl = winnerShare - entryFee;
                             }
                             player.pl.set(`comp-${comp.id}`, pl);
@@ -1693,12 +1916,12 @@ export default function LastManStandingPage() {
                           .sort((a, b) => b[1].total - a[1].total);
 
                         return (
-                          <table className="w-full border-collapse border border-gray-300 text-sm">
+                          <table className={GRID_TABLE}>
                             <thead>
                               <tr>
-                                <th className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-2 text-left font-semibold">Competition</th>
+                                <th className={GRID_TH_FIRST}>Competition</th>
                                 {playersList.map(([userId, player]) => (
-                                  <th key={userId} className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-2 text-center font-semibold">
+                                  <th key={userId} className={`${GRID_TH} min-w-[64px] normal-case tracking-normal`}>
                                     {player.username}
                                   </th>
                                 ))}
@@ -1708,9 +1931,15 @@ export default function LastManStandingPage() {
                               {(() => {
                                 // Build rows. In Combined view, aggregate to one row per season
                                 // (rolling the GW38 pot into 2025/2026). Otherwise show per-comp rows.
-                                const shortName = (n: string) => {
-                                  const m = n.match(/(\d+)\s*$/);
-                                  return m ? `C${m[1]}` : n;
+                                // "Competition 2" -> "C2". A name without a trailing number (e.g. the
+                                // rollover script's "<season> Last Man Standing") gets its position
+                                // within its season instead, so a season's first competition reads C1.
+                                const shortName = (comp: { id: number; name: string; season?: string | null }) => {
+                                  const m = comp.name.match(/(\d+)\s*$/);
+                                  if (m) return `C${m[1]}`;
+                                  const label = labelForCompetition(comp, historicalCompetitions || []);
+                                  const n = label.match(/^Competition (\d+)$/);
+                                  return n ? `C${n[1]}` : comp.name;
                                 };
                                 type Row = { label: string; getPl: (p: typeof playersList[0][1]) => number | undefined };
                                 let rows: Row[];
@@ -1734,7 +1963,7 @@ export default function LastManStandingPage() {
                                   }));
                                 } else {
                                   rows = completedComps.map(comp => ({
-                                    label: shortName(comp.name),
+                                    label: shortName(comp),
                                     getPl: (p) => p.pl.get(`comp-${comp.id}`),
                                   }));
                                   if (showPot) {
@@ -1743,12 +1972,12 @@ export default function LastManStandingPage() {
                                 }
                                 return rows.map((row, i) => (
                                   <tr key={i}>
-                                    <td className="border border-gray-300 p-2 font-medium">{row.label}</td>
+                                    <td className={GRID_TD_FIRST}>{row.label}</td>
                                     {playersList.map(([userId, player]) => {
                                       const pl = row.getPl(player);
-                                      if (pl === undefined) return <td key={userId} className="border border-gray-300 p-2 text-center text-gray-400">-</td>;
+                                      if (pl === undefined) return <td key={userId} className={`${GRID_TD} text-muted-foreground/60`}>–</td>;
                                       return (
-                                        <td key={userId} className={`border border-gray-300 p-2 text-center ${pl > 0 ? 'text-green-600 font-medium' : pl < 0 ? 'text-red-600' : ''}`}>
+                                        <td key={userId} className={`${GRID_TD} ${pl > 0 ? 'text-green-600 font-medium' : pl < 0 ? 'text-red-600' : ''}`}>
                                           {pl > 0 ? '+' : pl < 0 ? '-' : ''}{Math.abs(pl)}
                                         </td>
                                       );
@@ -1758,10 +1987,10 @@ export default function LastManStandingPage() {
                               })()}
                             </tbody>
                             <tfoot>
-                              <tr className="bg-gray-50 dark:bg-gray-900">
-                                <td className="border border-gray-300 p-2 font-bold">Total</td>
+                              <tr className="bg-muted">
+                                <td className="border-t border-border py-2 pl-3 pr-2 text-left font-bold">Total</td>
                                 {playersList.map(([userId, player]) => (
-                                  <td key={userId} className={`border border-gray-300 p-2 text-center font-bold whitespace-nowrap ${player.total > 0 ? 'text-green-600' : player.total < 0 ? 'text-red-600' : ''}`}>
+                                  <td key={userId} className={`border-t border-border px-2 py-2 text-center font-bold whitespace-nowrap ${player.total > 0 ? 'text-green-600' : player.total < 0 ? 'text-red-600' : ''}`}>
                                     {player.total < 0 ? '-' : ''}£{Math.abs(player.total)}
                                   </td>
                                 ))}
@@ -1784,7 +2013,7 @@ export default function LastManStandingPage() {
                   {historyLoading ? (
                     <Skeleton className="h-64 w-full" />
                   ) : (
-                    <div className="overflow-x-auto">
+                    <div className={GRID_WRAP}>
                       {(() => {
                         const seasonFilter = (c: any) => selectedStatsSeason === "combined" || (c.season || "2025/2026") === selectedStatsSeason;
                         const completedComps = (historicalCompetitions?.filter(c => c.status === "completed") || [])
@@ -1819,9 +2048,8 @@ export default function LastManStandingPage() {
                         const allComps = [...completedComps, ...activeComps];
 
                         allComps.forEach(comp => {
-                          const winnerId = (comp as any)?.winner_id || comp?.winnerId;
-                          const coWinnerId = (comp as any)?.co_winner_id || (comp as any)?.coWinnerId;
-                          const winShare = coWinnerId ? 0.5 : 1;
+                          const winnerIds = competitionWinnerUserIds(comp);
+                          const winShare = winnerIds.length > 0 ? 1 / winnerIds.length : 1;
                           const startGW = (comp as any)?.start_gameweek || comp?.startGameweek || 1;
                           const finalGW = (comp as any)?.current_gameweek ?? comp?.currentGameweek ?? startGW;
 
@@ -1838,8 +2066,7 @@ export default function LastManStandingPage() {
 
                           // Compute rounds per participant first, then rank by rounds (desc)
                           const withRounds = comp.participants.map(p => {
-                            const isWinner = winnerId === (p as any).id || winnerId === p.userId
-                              || coWinnerId === (p as any).id || coWinnerId === p.userId;
+                            const isWinner = winnerIds.includes(p.userId);
                             return { p, isWinner, rounds: getRounds(p, isWinner) };
                           }).sort((a, b) => b.rounds - a.rounds);
 
@@ -2015,12 +2242,12 @@ export default function LastManStandingPage() {
                         ].filter(d => d.key !== 'random' || selectedStatsSeason !== '2024/2025');
 
                         return (
-                          <table className="w-full border-collapse border border-gray-300 text-sm">
+                          <table className={GRID_TABLE}>
                               <thead>
                                 <tr>
-                                  <th className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-2 text-left font-semibold whitespace-nowrap">Stat</th>
+                                  <th className={GRID_TH_FIRST}>Stat</th>
                                   {playersList.map(([userId, s]) => (
-                                    <th key={userId} className="border border-gray-300 bg-gray-100 dark:bg-gray-800 p-2 text-center font-semibold">
+                                    <th key={userId} className={`${GRID_TH} min-w-[64px] normal-case tracking-normal`}>
                                       {s.username}
                                     </th>
                                   ))}
@@ -2032,7 +2259,7 @@ export default function LastManStandingPage() {
                                   const bestVal = stat.best === 'max' ? Math.max(...values) : Math.min(...values.filter(v => v >= 0));
                                   return (
                                     <tr key={stat.key}>
-                                      <td className="border border-gray-300 p-2 font-medium whitespace-nowrap text-xs sm:text-sm" title={stat.tooltip}>
+                                      <td className={GRID_TD_FIRST} title={stat.tooltip}>
                                         {stat.label}
                                       </td>
                                       {playersList.map(([userId, s]) => {
@@ -2041,7 +2268,7 @@ export default function LastManStandingPage() {
                                         return (
                                           <td
                                             key={userId}
-                                            className={`border border-gray-300 p-2 text-center text-sm ${isBest ? 'font-bold text-green-600' : ''}`}
+                                            className={`${GRID_TD} ${isBest ? 'font-bold text-green-600' : ''}`}
                                           >
                                             {stat.format(raw, s)}
                                           </td>
@@ -2078,39 +2305,33 @@ function formatGbp(n: number): string {
 }
 
 function renderCompletedBanner(competition: any, rules: LmsRuleSet, prize?: CompPrize) {
-  const winnerId = competition.winner_id ?? competition.winnerId ?? null;
-  const coWinnerId = competition.co_winner_id ?? competition.coWinnerId ?? null;
   const participants = competition.participants ?? [];
-  const winner = participants.find(
-    (p: any) => p.id === winnerId || p.userId === winnerId,
-  );
-  const coWinner = coWinnerId
-    ? participants.find((p: any) => p.id === coWinnerId || p.userId === coWinnerId)
-    : null;
-  const winnerName = winner?.user?.username;
-  const coWinnerName = coWinner?.user?.username;
+  const winnerNames: string[] = competitionWinnerUserIds(competition)
+    .map((id) => participants.find((p: any) => p.userId === id)?.user?.username)
+    .filter(Boolean);
+  const winnerName = winnerNames[0];
   // The pot is rollover-aware (a win after all-outs takes the accumulated pot)
   // and season-correct — both handled by the shared prize map. Fall back to a
   // plain stake × entrants only when this competition isn't in the map yet.
-  const prizeAmount = prize?.prizePool ?? rules.entryFeeGbp * participants.length;
+  const prizeAmount = prize?.prizePool ?? entryFeeForCompetition(competition, rules) * participants.length;
 
   let body: JSX.Element;
-  if (winnerName && coWinnerName) {
-    // Joint winners (both final-round survivors win their match) — split equally.
-    const share = prize?.winnerShare ?? prizeAmount / 2;
+  if (winnerNames.length > 1) {
+    // Joint winners (everyone who went out in the final gameweek) — split equally.
+    const share = prize?.winnerShare ?? prizeAmount / winnerNames.length;
     body = (
-      <div className="text-base text-yellow-800 dark:text-yellow-200">
-        Joint winners: <span className="font-bold">{winnerName} & {coWinnerName}</span>{" "}
+      <div className="text-base text-yellow-800">
+        Joint winners: <span className="font-bold">{winnerNames.join(" & ")}</span>{" "}
         ({formatGbp(share)} each)
       </div>
     );
   } else if (winnerName) {
     body = (
-      <div className="text-base text-yellow-800 dark:text-yellow-200">
+      <div className="text-base text-yellow-800">
         Winner: <span className="font-bold">{winnerName}</span> ({formatGbp(prize?.winnerShare ?? prizeAmount)})
       </div>
     );
-  } else if (rules.allOutBehaviour === "split_final_round") {
+  } else if (isLegacySplitCompetition(competition, rules)) {
     // No single winner (everyone remaining went out in the same gameweek). For
     // groups that split on an all-out (e.g. Rovers), the joint winners are the
     // players who lasted longest — those eliminated in the final round — and the
@@ -2119,29 +2340,29 @@ function renderCompletedBanner(competition: any, rules: LmsRuleSet, prize?: Comp
     const maxRound = participants.reduce((m: number, p: any) => Math.max(m, elimRound(p)), 0);
     const coWinners = participants.filter((p: any) => elimRound(p) === maxRound);
     const names = coWinners.map((p: any) => p.user?.username).filter(Boolean);
-    const pot = prize?.prizePool ?? rules.entryFeeGbp * participants.length;
+    const pot = prize?.prizePool ?? entryFeeForCompetition(competition, rules) * participants.length;
     const share = names.length ? pot / names.length : pot;
     body =
       names.length > 0 ? (
-        <div className="text-base text-yellow-800 dark:text-yellow-200">
+        <div className="text-base text-yellow-800">
           Joint winners: <span className="font-bold">{names.join(" & ")}</span>{" "}
           ({formatGbp(share)} each)
         </div>
       ) : (
-        <div className="text-base text-yellow-800 dark:text-yellow-200">
+        <div className="text-base text-yellow-800">
           All players eliminated — pot split between the final round's players
         </div>
       );
   } else {
     body = (
-      <div className="text-base text-yellow-800 dark:text-yellow-200">
+      <div className="text-base text-yellow-800">
         No winner — all players eliminated (pot rolls over)
       </div>
     );
   }
 
   return (
-    <Card className="border-2 border-yellow-400 bg-gradient-to-br from-yellow-50 to-amber-50 dark:from-yellow-950/40 dark:to-amber-950/40">
+    <Card className="border-2 border-yellow-400 bg-gradient-to-br from-yellow-50 to-amber-50">
       <CardContent className="py-6 text-center space-y-2">
         <div className="text-4xl">🏆</div>
         {body}
@@ -2150,14 +2371,58 @@ function renderCompletedBanner(competition: any, rules: LmsRuleSet, prize?: Comp
   );
 }
 
-// Rules tab body — content depends on the active group's LMS rule variant.
+// "90 minutes", "2 hours", "1 day", "1 hour 30 minutes".
+function formatLeadTime(minutes: number): string {
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
+  if (minutes < 60) return plural(minutes, "minute");
+  if (minutes % 1440 === 0) return plural(minutes / 1440, "day");
+  if (minutes % 60 === 0) return plural(minutes / 60, "hour");
+  return `${plural(Math.floor(minutes / 60), "hour")} ${plural(minutes % 60, "minute")}`;
+}
+
+// Rules tab body — every line comes from the group's configured LMS rules.
 function LmsRulesTabContent({ rules }: { rules: LmsRuleSet }) {
-  const splitFinalRound = rules.allOutBehaviour === "split_final_round";
-  const lockHours = rules.lockHoursBeforeKickoff;
   const lockText =
-    lockHours === 0
+    rules.deadlineMinutesBeforeKickoff === 0
       ? "at kick-off of the gameweek's first match"
-      : `${lockHours} ${lockHours === 1 ? "hour" : "hours"} before kick-off of the gameweek's first match`;
+      : `${formatLeadTime(rules.deadlineMinutesBeforeKickoff)} before kick-off of the gameweek's first match`;
+  const oneLife = rules.lives <= 1;
+
+  const allOutText =
+    rules.allOutPolicy === "co_winners"
+      ? "If all remaining players are eliminated in the same gameweek, the pot is split equally between the players who went out that gameweek (not everyone who entered)"
+      : "If all remaining players are eliminated in the same gameweek, nobody wins: everyone is back in for the next competition, and the pot rolls over into it on top of everyone's new buy-in";
+
+  // Worked rollover example in the group's own buy-in, e.g. £10 → £20 per person.
+  const fee = rules.entryFeeGbp;
+  const examplePlayers = 8;
+  const rolloverExample =
+    rules.allOutPolicy === "rollover" && fee > 0
+      ? `Example: ${examplePlayers} players pay ${formatGbp(fee)} each, so the pot is ${formatGbp(fee * examplePlayers)}. ` +
+        `If everyone goes out in the same gameweek, nobody wins. Everyone is back in and pays another ${formatGbp(fee)} for the next competition, ` +
+        `so it's worth ${formatGbp(fee * 2 * examplePlayers)}: ${formatGbp(fee * 2)} per person instead of ${formatGbp(fee)}. ` +
+        `If that one rolls over too, the next is worth ${formatGbp(fee * 3)} per person. Rollovers don't carry into a new season.`
+      : null;
+
+  const items: string[] = [
+    `£${rules.entryFeeGbp} entry fee per player, per competition`,
+    "Pick one team each gameweek to win their match",
+    "If your team wins, you advance to the next round",
+    oneLife
+      ? "If your team loses or draws, you are eliminated from the competition"
+      : `Everyone has ${rules.lives} lives: each time your team loses or draws you lose one, and you're out when they're all gone`,
+    "You can never pick the same team twice in the same competition",
+    `Team selection automatically locks ${lockText}`,
+    rules.missedPickPolicy === "eliminate"
+      ? oneLife
+        ? "If you don't pick a team before the deadline, it counts as a losing pick, so you're out"
+        : "If you don't pick a team before the deadline, it counts as a losing pick and costs you a life"
+      : "If you don't pick a team before the deadline, a random team you haven't used yet is picked for you. Everyone can watch it drawn live on a randomiser wheel 3 minutes after the deadline, and the pick then shows with an orange * badge on its corner",
+    "The last player standing wins the entire pot",
+    allOutText,
+    "If the season ends with multiple players remaining, the pot is split equally",
+    "A new competition starts automatically as soon as the previous one ends, and a fresh one opens for GW1 of each new season",
+  ];
 
   return (
     <Card>
@@ -2166,73 +2431,19 @@ function LmsRulesTabContent({ rules }: { rules: LmsRuleSet }) {
       </CardHeader>
       <CardContent>
         <ul className="space-y-3 text-sm">
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>£{rules.entryFeeGbp} entry fee per player, per competition</span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>Pick one team each gameweek to win their match</span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>If your team wins, you advance to the next round</span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>If your team loses or draws, you are eliminated from the competition</span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>You cannot pick the same team twice in the same competition</span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>Team selection automatically locks {lockText}</span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>
-              Players who don't select a team before the deadline will be randomly assigned one
-              (shown with asterisk *)
-            </span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>The last player standing wins the entire pot</span>
-          </li>
-          {/* For Rovers (splitFinalRound) the "all out in the same week → split"
-              rule reads first; other groups keep season-ends-with-multiple
-              first, then the rollover rule. */}
-          {splitFinalRound && (
-            <li className="flex items-start gap-2">
+          {items.map((text) => (
+            <li key={text} className="flex items-start gap-2">
               <span className="text-primary">•</span>
               <span>
-                If all remaining players are eliminated in the same gameweek, the
-                pot is split equally between them
+                {text}
+                {text === allOutText && rolloverExample && (
+                  <span className="mt-2 block rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+                    {rolloverExample}
+                  </span>
+                )}
               </span>
             </li>
-          )}
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>
-              If the season ends with multiple players remaining, the pot is
-              split equally
-            </span>
-          </li>
-          {!splitFinalRound && (
-            <li className="flex items-start gap-2">
-              <span className="text-primary">•</span>
-              <span>
-                If nobody wins a competition (all remaining players eliminated at
-                the same time), the money rolls over to the next competition
-              </span>
-            </li>
-          )}
-          <li className="flex items-start gap-2">
-            <span className="text-primary">•</span>
-            <span>New competitions start automatically when the previous one ends</span>
-          </li>
+          ))}
         </ul>
       </CardContent>
     </Card>

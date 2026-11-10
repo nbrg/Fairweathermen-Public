@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { AdminLayout } from "@/components/AdminNav";
 
 export default function AdminStats() {
   const [apiKey, setApiKey] = useState('');
@@ -17,6 +18,8 @@ export default function AdminStats() {
     const savedKey = localStorage.getItem('adminApiKey');
     if (savedKey) {
       setApiKey(savedKey);
+      // Already entered on another admin page, so load straight away.
+      fetchStats(savedKey);
     }
   }, []);
   
@@ -55,17 +58,17 @@ export default function AdminStats() {
     });
   };
   
-  const fetchStats = async () => {
+  const fetchStats = async (key: string = apiKey) => {
     setLoading(true);
     setError('');
     
     try {
       // Save the API key for next time
-      localStorage.setItem('adminApiKey', apiKey);
+      localStorage.setItem('adminApiKey', key);
       
       const response = await fetch('/api/admin/visitors', {
         headers: {
-          'x-api-key': apiKey
+          'x-api-key': key
         },
         // Add cache-busting parameter to prevent caching
         cache: 'no-store'
@@ -89,8 +92,8 @@ export default function AdminStats() {
   };
   
   return (
-    <div className="container max-w-5xl mx-auto p-4">
-      <h1 className="text-3xl font-bold my-6">Visitor Statistics Dashboard</h1>
+    <AdminLayout>
+      <h1 className="mb-4 text-2xl font-bold text-primary">Visitor Statistics Dashboard</h1>
       
       <Card className="mb-6">
         <CardHeader>
@@ -105,7 +108,7 @@ export default function AdminStats() {
             placeholder="Enter your admin API key"
             className="flex-1"
           />
-          <Button onClick={fetchStats} disabled={loading || !apiKey}>
+          <Button onClick={() => fetchStats()} disabled={loading || !apiKey}>
             {loading ? 'Loading...' : 'View Stats'}
           </Button>
         </CardContent>
@@ -375,7 +378,7 @@ export default function AdminStats() {
                       }
                       
                       return (
-                        <tr key={visitor.id} className="bg-white border-b">
+                        <tr key={visitor.id} className="bg-card border-b">
                           <td className="px-4 py-4">
                             <input
                               type="checkbox"
@@ -394,7 +397,7 @@ export default function AdminStats() {
                       );
                     })}
                     {(!filteredData || filteredData.length === 0) && (
-                      <tr className="bg-white border-b">
+                      <tr className="bg-card border-b">
                         <td colSpan={7} className="px-4 py-4 text-center">
                           {showMobileOnly ? 'No mobile visitors found' : 'No visitor data yet'}
                         </td>
@@ -407,6 +410,6 @@ export default function AdminStats() {
           </Card>
         </div>
       )}
-    </div>
+    </AdminLayout>
   );
 }

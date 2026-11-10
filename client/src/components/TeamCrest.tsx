@@ -176,11 +176,54 @@ function resolveCrestUrl(fdId: number): Promise<string | null> {
   return p;
 }
 
+// Circular crests fill their badge edge to edge, so at the same size as a
+// shield they read noticeably smaller. These are drawn larger to match.
+const ROUND_CRESTS = new Set(["manchester city", "chelsea", "brighton", "brentford"]);
+
+type CrestTeam = Pick<Team, "name" | "shortName">;
+
+// How much of its round badge a crest should fill: shields at 82%, circular
+// crests at 92% so they look the same size.
+export function crestFill(team: CrestTeam): number {
+  return ROUND_CRESTS.has(normalizeName(team.name)) ? 0.92 : 0.82;
+}
+
+// The monogram fallback's colours and letters, for drawing a crest yourself.
+export function crestFallback(team: CrestTeam): { bg: string; fg: string; initials: string } {
+  const key = normalizeName(team.name);
+  return { ...(BRAND[key] ?? hashColor(key)), initials: initialsFor(team as Team) };
+}
+
+// The crest image url for a club (null → show the monogram). Shares the cache
+// with <TeamCrest>, so it resolves instantly once any badge has loaded it.
+export function useCrestUrl(team: CrestTeam): string | null {
+  const fdId = NAME_TO_FD_ID[normalizeName(team.name)];
+  const [url, setUrl] = useState<string | null>(() => {
+    if (fdId == null) return null;
+    if (crestUrlCache.has(fdId)) return crestUrlCache.get(fdId)!;
+    return `https://crests.football-data.org/${fdId}.png`;
+  });
+  useEffect(() => {
+    if (fdId == null) return;
+    if (crestUrlCache.has(fdId)) {
+      setUrl(crestUrlCache.get(fdId)!);
+      return;
+    }
+    let active = true;
+    resolveCrestUrl(fdId).then((u) => active && setUrl(u));
+    return () => {
+      active = false;
+    };
+  }, [fdId]);
+  return url;
+}
+
 function TeamCrestBase({ team, size = 28, transparent = false }: { team: Team; size?: number; transparent?: boolean }) {
   const key = normalizeName(team.name);
   const fdId = NAME_TO_FD_ID[key];
   const colors = BRAND[key] ?? hashColor(key);
   const initials = initialsFor(team);
+  const fill = crestFill(team);
 
   // Seed from the module cache so re-mounts paint the right thing on the first
   // frame. If we've never resolved this crest, optimistically try the png url
@@ -221,7 +264,7 @@ function TeamCrestBase({ team, size = 28, transparent = false }: { team: Team; s
         style={{
           ...base,
           backgroundImage: `url(${url})`,
-          backgroundSize: transparent ? "contain" : "82%",
+          backgroundSize: transparent ? "contain" : `${Math.round(fill * 100)}%`,
         }}
       />
     );

@@ -5,6 +5,7 @@ export const CODES = {
   alex: "demo-alex",
   blake: "demo-blake",
   casey: "demo-casey",
+  dana: "away-dana", // Wanderers: a third group that plays no games here
 } as const;
 
 // Log in through the landing-page form and wait for the app to render.

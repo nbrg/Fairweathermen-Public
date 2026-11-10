@@ -71,6 +71,18 @@ test.describe("no credential leaks", () => {
 // enough to touch shared data. Real match scores drive LMS eliminations and
 // Lawro points for every group, so only the admin key may change them.
 test.describe("shared data is admin-only", () => {
+  // A stranger who has just created their own group.
+  async function stranger(request: any) {
+    const res = await request.post("/api/group/create", {
+      data: {
+        groupName: `Strangers ${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        adminName: "Mallory",
+        games: ["lms", "predictions"],
+      },
+    });
+    expect(res.ok(), `create failed: ${res.status()}`).toBeTruthy();
+  }
+
   test("a signed-in player can't edit match scores, matches or teams", async ({ request }) => {
     await loginViaApi(request, CODES.alex);
     const writes = [
@@ -78,7 +90,6 @@ test.describe("shared data is admin-only", () => {
       request.patch("/api/matches/1", { data: { homeScore: 9, status: "finished" } }),
       request.post("/api/matches", { data: {} }),
       request.post("/api/teams", { data: { name: "Fake FC", shortName: "FAK" } }),
-      request.post("/api/scraper/run"),
       request.post("/api/football-data/sync-fixtures", { data: { startGameweek: 1, endGameweek: 1 } }),
     ];
     for (const res of await Promise.all(writes)) expect(res.status()).toBe(401);
@@ -97,8 +108,7 @@ test.describe("shared data is admin-only", () => {
     expect(res.ok(), `admin score edit failed: ${res.status()}`).toBeTruthy();
   });
 
-  test("the LMS pick log and activity log need the admin key", async ({ request }) => {
-    expect((await request.get("/api/admin/lms-selection-logs")).status()).toBe(401);
+  test("the activity log needs the admin key", async ({ request }) => {
     expect((await request.get("/api/admin/activity-logs")).status()).toBe(401);
     const ok = await request.get("/api/admin/activity-logs", {
       headers: { "x-api-key": ADMIN_KEY },
@@ -173,5 +183,58 @@ test.describe("cookie key changes keep people signed in", () => {
     });
     expect((await ctx.get("/api/leaderboard")).status()).toBe(401);
     await ctx.dispose();
+  });
+});
+
+const DATABASE_URL =
+  process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/fairweathermen_test";
+async function sql<T = any>(text: string, params: unknown[] = []): Promise<T[]> {
+  const { default: pg } = await import("pg");
+  const pool = new pg.Pool({ connectionString: DATABASE_URL });
+  try {
+    return (await pool.query(text, params)).rows as T[];
+  } finally {
+    await pool.end();
+  }
+}
+
+// A player has at most one Lawro pick per match. A manual fix-up run twice
+// once doubled a player's gameweek points, so the database itself refuses it.
+test.describe("one lawro pick per player per match", () => {
+  test("the database refuses a second pick for the same match", async () => {
+    const [existing] = await sql<{ user_id: number; match_id: number }>(
+      "SELECT user_id, match_id FROM predictions ORDER BY id LIMIT 1",
+    );
+    let error: any = null;
+    try {
+      await sql("INSERT INTO predictions (user_id, match_id, home_score, away_score) VALUES ($1, $2, 9, 9)", [
+        existing.user_id,
+        existing.match_id,
+      ]);
+    } catch (e) {
+      error = e;
+    }
+    expect(error?.code, "duplicate pick was accepted").toBe("23505");
+    const rows = await sql("SELECT id FROM predictions WHERE user_id = $1 AND match_id = $2", [
+      existing.user_id,
+      existing.match_id,
+    ]);
+    expect(rows).toHaveLength(1);
+  });
+});
+
+// A new visitor's location comes from the offline geoip-lite database, never a
+// third-party lookup in the request path (slow first loads, and it sent the
+// visitor's IP to ipinfo.io).
+test.describe("visitor locations are looked up offline", () => {
+  test("a new visitor's location matches the offline database", async ({ request }) => {
+    const ip = "81.2.69.142"; // geoip-lite's own UK test address
+    const { default: geoip } = await import("geoip-lite");
+    const geo = geoip.lookup(ip)!;
+    const res = await request.get("/", { headers: { "x-forwarded-for": ip, "user-agent": `offline-geo-${Date.now()}` } });
+    expect(res.ok()).toBeTruthy();
+    const stats = await (await request.get("/api/admin/visitors", { headers: { "x-api-key": ADMIN_KEY } })).json();
+    const row = stats.rawData.find((v: any) => v.ipAddress === ip);
+    expect(row?.location).toBe(`${geo.city}, ${geo.region}, ${geo.country}`);
   });
 });

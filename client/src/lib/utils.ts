@@ -6,12 +6,13 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-// The site owner's username. The Activity/Audit logs' "Hide my own activity"
-// hides entries attributed to this user (by name, regardless of location) — so
-// someone else logging in from the owner's home city is still shown.
-export const OWN_USERNAME = "Alex";
+// The site owner's username, set at build time with VITE_OWN_USERNAME. The
+// admin logs hide entries attributed to this user by default (by name,
+// regardless of location), so the owner's own clicks don't drown out everyone
+// else's. Unset = nothing is hidden.
+export const OWN_USERNAME: string = (import.meta.env.VITE_OWN_USERNAME ?? "").trim();
 export function isOwnUsername(username: string | null | undefined): boolean {
-  return (username ?? "").trim().toLowerCase() === OWN_USERNAME.toLowerCase();
+  return OWN_USERNAME !== "" && (username ?? "").trim().toLowerCase() === OWN_USERNAME.toLowerCase();
 }
 
 export function formatDateTime(date: Date): string {

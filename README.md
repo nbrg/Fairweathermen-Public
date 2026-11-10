@@ -7,10 +7,11 @@ One install hosts two separate games, each with its own pages and tables:
   League match, a gameweek at a time. You get 3 points for the exact score and 1
   for the right result. Your picks stay private until the gameweek kicks off,
   then everyone's are shown. There's a leaderboard, per-season and per-gameweek
-  views, a live countdown to the deadline, and a stats tab.
+  views, a live countdown to the deadline, and a Tendencies tab of charts.
 - **Last Man Standing.** Each gameweek you pick one team to win. Get it wrong and
   you're out; last person standing takes the pot. Competitions can run across
-  several seasons, and every pick change is logged.
+  several seasons, every pick change is logged, and a missed pick is drawn on a
+  randomiser wheel that everyone in the group watches spin.
 
 Live scores and fixtures come from [football-data.org](https://www.football-data.org/).
 Eliminations, leaderboards and reminders all happen on their own in the
@@ -69,6 +70,9 @@ A few things I'd point at if you're reading the code:
   football-data.org often while matches are in play and sits idle otherwise, to
   stay inside the API's rate limit. When a match finishes it works out the Last
   Man Standing result straight away and the eliminations follow from that.
+  From the 90th minute it also asks the Fantasy Premier League feed whether the
+  match is over, because that feed marks full time sooner; the score itself
+  always comes from football-data.org.
 - **One person, many groups.** You log in with a private code, not a username and
   password. If you're in more than one group you have one code and switch between
   them. Every write that touches another user's data checks you're actually in

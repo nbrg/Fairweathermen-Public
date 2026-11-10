@@ -1,5 +1,7 @@
 import { useLocation } from "wouter";
 import { useCallback, useEffect, useRef } from "react";
+import { trackUiEvent } from "@/lib/track";
+import { PUSH_TAG_PARAM, PUSH_VIA_PARAM, PUSH_VIA_VALUE } from "@shared/activityEvents";
 
 // Records a client-side "visit" to the activity feed. Fires on every route
 // change AND whenever the app is re-opened / brought back to the foreground.
@@ -63,6 +65,42 @@ export function usePageTracking() {
     }
     track(location, "navigation");
   }, [location, track]);
+
+  // Opened by tapping a push notification: its link carries ?via=push&n=<tag>
+  // (server/push.ts). Record it, then tidy the marker out of the address bar so
+  // a reload or shared link doesn't count again.
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get(PUSH_VIA_PARAM) !== PUSH_VIA_VALUE) return;
+      trackUiEvent("push_opened", { tag: url.searchParams.get(PUSH_TAG_PARAM) });
+      url.searchParams.delete(PUSH_VIA_PARAM);
+      url.searchParams.delete(PUSH_TAG_PARAM);
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    } catch {
+      // Never let tracking break the page.
+    }
+  }, []);
+
+  // Every background/foreground switch, for the /admin/activity timeline:
+  // "put the app in the background" and "came back (away 3m 10s)". Unlike the
+  // throttled foreground visit below, these are recorded every time.
+  const hiddenAt = useRef<number | null>(null);
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        if (hiddenAt.current != null) return;
+        hiddenAt.current = Date.now();
+        trackUiEvent("app_hidden");
+      } else if (document.visibilityState === "visible" && hiddenAt.current != null) {
+        const awayMs = Date.now() - hiddenAt.current;
+        hiddenAt.current = null;
+        trackUiEvent("app_visible", { awayMs });
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
 
   // App re-opened / re-foregrounded on the same route.
   useEffect(() => {

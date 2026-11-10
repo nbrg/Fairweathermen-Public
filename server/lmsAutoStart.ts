@@ -2,8 +2,9 @@ import { db } from "./db";
 import { groups, users, type LmsCompetition } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { storage } from "./storage";
-import { getGroupRules } from "./groupRules";
+import { getGroupRules, stakeForNewCompetition } from "./groupRules";
 import { londonStringToUtcMs } from "@shared/time";
+import { nextLmsRoster, stopWaiting, seesLms } from "./lmsEnrolment";
 
 // LMS competitions start themselves — no script needed:
 //  - a newly created group with LMS enabled gets a competition straight away,
@@ -78,32 +79,28 @@ export async function ensureLmsCompetitionForGroup(groupId: number): Promise<Lms
   let roster: number[];
   const latest = history[0];
   if (latest) {
-    const prior = await storage.getLmsParticipantsByCompetition(latest.id);
-    roster = Array.from(new Set(prior.map((p) => p.userId)));
+    // Plus anyone who joined after that competition started (lmsEnrolment.ts).
+    roster = await nextLmsRoster(groupId, latest);
   } else {
     const members = await db
       .select({ id: users.id, enabledGames: users.enabledGames })
       .from(users)
       .where(eq(users.groupId, groupId));
-    roster = members
-      .filter((m) => {
-        const override = m.enabledGames as string[] | null;
-        return override ? override.includes("lms") : true;
-      })
-      .map((m) => m.id);
+    roster = members.filter((m) => seesLms(m.enabledGames as string[] | null)).map((m) => m.id);
   }
   if (roster.length === 0) return null;
 
-  const season = next.season ?? latest?.season ?? "2025/2026";
-  const seasonCount = history.filter((c) => (c.season ?? null) === season).length;
+  const season = next.season ?? latest?.season ?? undefined;
+  const seasonCount = history.filter((c) => (c.season ?? null) === (season ?? null)).length;
   const competition = await storage.createLmsCompetition({
     groupId,
-    season,
+    ...(season ? { season } : {}),
     name: `Competition ${seasonCount + 1}`,
     startGameweek: next.gameweek,
     currentGameweek: next.gameweek,
     status: "active",
     prizeAmount: rules.lms.buyIn,
+    stakeGbp: await stakeForNewCompetition(groupId),
   });
   for (const userId of roster) {
     await storage.createLmsParticipant({
@@ -113,9 +110,10 @@ export async function ensureLmsCompetitionForGroup(groupId: number): Promise<Lms
       eliminatedInRound: null,
     });
   }
+  await stopWaiting(roster);
   console.log(
     `[LMS] Auto-started competition ${competition.id} for group ${groupId} at GW${next.gameweek}` +
-      ` (${season}) with ${roster.length} player(s)`,
+      ` (${season ?? "unknown season"}) with ${roster.length} player(s)`,
   );
   return competition;
 }

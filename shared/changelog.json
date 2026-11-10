@@ -1,0 +1,118 @@
+[
+  {
+    "id": "2026-11-10-november-catch-up",
+    "number": 18,
+    "recordedAt": "2026-11-10T14:00:00Z",
+    "title": "November catch-up from the live site",
+    "bullets": [
+      "Lawro: score entry that saves each pick as you type and retries on a bad connection, a grid that flips to one row per player once the deadline passes, and new Tendencies charts.",
+      "Last Man Standing: a randomiser wheel for missed picks, late joiners wait for the next competition, and results land right after the final whistle.",
+      "Phones get a bottom navigation bar, and there is a Settings page with light and dark themes.",
+      "Admin: metrics, changes, a fuller audit log and activity timeline, and permanent deletion of a player or group.",
+      "Security: one Lawro pick per player and match, admin-only shared writes, and visitor locations looked up offline.",
+      "Removed code that was no longer used."
+    ]
+  },
+  {
+    "number": 17,
+    "title": "Remove LMS team reuse and sit-the-week-out options",
+    "mergedAt": "2026-10-27T09:08:26Z",
+    "bullets": []
+  },
+  {
+    "number": 16,
+    "title": "LMS: open Team Selections table scrolled to the latest gameweek",
+    "mergedAt": "2026-10-27T09:02:59Z",
+    "bullets": []
+  },
+  {
+    "number": 15,
+    "title": "Default LMS buy-in to £10; show newly enabled rules without a reload",
+    "mergedAt": "2026-10-27T08:56:49Z",
+    "bullets": []
+  },
+  {
+    "number": 14,
+    "title": "README: note this is a simplified open copy of the private site",
+    "mergedAt": "2026-10-27T07:15:16Z",
+    "bullets": []
+  },
+  {
+    "number": 13,
+    "title": "README: step-by-step fork, clone and setup instructions",
+    "mergedAt": "2026-10-27T06:46:31Z",
+    "bullets": []
+  },
+  {
+    "number": 12,
+    "title": "Remove the Replit dev-banner and stale World Cup ignore lines",
+    "mergedAt": "2026-10-26T22:23:07Z",
+    "bullets": []
+  },
+  {
+    "number": 11,
+    "title": "Split CI into parallel per-browser jobs and run only affected specs",
+    "mergedAt": "2026-10-26T19:04:27Z",
+    "bullets": []
+  },
+  {
+    "number": 10,
+    "title": "Add the growth / onboarding dashboard",
+    "mergedAt": "2026-10-26T18:06:33Z",
+    "bullets": []
+  },
+  {
+    "number": 9,
+    "title": "Add the Lawro Joker: double one pick a gameweek",
+    "mergedAt": "2026-10-26T17:46:26Z",
+    "bullets": []
+  },
+  {
+    "number": 8,
+    "title": "Tell everyone when a group's rules change",
+    "mergedAt": "2026-10-26T17:20:45Z",
+    "bullets": []
+  },
+  {
+    "number": 7,
+    "title": "Auto-start an LMS competition when a group needs one",
+    "mergedAt": "2026-10-26T16:52:35Z",
+    "bullets": []
+  },
+  {
+    "number": 6,
+    "title": "Group admin Players card on the settings page",
+    "mergedAt": "2026-10-26T13:27:48Z",
+    "bullets": []
+  },
+  {
+    "number": 5,
+    "title": "Matchday redesign: palette, header, sign-in, crest icon, admin nav",
+    "mergedAt": "2026-10-26T13:06:19Z",
+    "bullets": []
+  },
+  {
+    "number": 4,
+    "title": "Lock shared-data writes to the admin key, hide Lawro picks everywhere, auto-generate the cookie secret",
+    "mergedAt": "2026-10-26T12:49:51Z",
+    "bullets": []
+  },
+  {
+    "number": 3,
+    "title": "Never hand out a login code by name on group create/join",
+    "mergedAt": "2026-10-25T19:09:12Z",
+    "bullets": []
+  },
+  {
+    "number": 2,
+    "title": "Remove Golf, and port Lawro Tendencies fixes + group-switch tab behaviour",
+    "mergedAt": "2026-10-25T18:51:29Z",
+    "bullets": []
+  },
+  {
+    "number": 1,
+    "title": "Self-service group creation, invites, and per-group rules",
+    "mergedAt": "2026-10-21T10:05:31Z",
+    "bullets": []
+  }
+]

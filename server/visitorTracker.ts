@@ -2,16 +2,19 @@ import { Request, Response, NextFunction } from "express";
 import { db } from "./db";
 import { visitors } from "@shared/schema";
 import { eq, sql } from "drizzle-orm";
-import axios from "axios";
+import geoip from "geoip-lite";
+import { isPrivateIP } from "@shared/ipLocation";
 
-// Function to get IP location information from ipinfo.io
-async function getLocationInfo(ip: string) {
+// A new visitor's location, from the offline geoip-lite database bundled with
+// the app. It used to be a blocking request to ipinfo.io on every new
+// visitor's first page load (slow, no timeout, and it sent their IP to a third
+// party). Kept in the same "city, region, country" shape as older rows.
+function getLocationInfo(ip: string): { city?: string; region?: string; country?: string } | null {
+  if (isPrivateIP(ip)) return { city: "Local", region: "", country: "Local" };
   try {
-    // Note: For a production app, consider using an API key for better rate limits
-    const response = await axios.get(`https://ipinfo.io/${ip}/json`);
-    return response.data;
+    return geoip.lookup(ip);
   } catch (error) {
-    console.error("Error fetching location info:", error);
+    console.error("Error looking up location:", error);
     return null;
   }
 }
@@ -492,7 +495,7 @@ export const visitorTrackingMiddleware = async (req: Request, res: Response, nex
         .where(eq(visitors.id, existingVisitor.id));
     } else {
       // This is a new visitor, get location info
-      const locationInfo = await getLocationInfo(ipAddress);
+      const locationInfo = getLocationInfo(ipAddress);
       const location = locationInfo ? 
         `${locationInfo.city || ''}, ${locationInfo.region || ''}, ${locationInfo.country || ''}` : 
         "Unknown";
@@ -524,7 +527,7 @@ export const getVisitorStats = async (req: Request, res: Response) => {
     // Check for admin authentication here
     // This is a simple example - in a real app, use proper authentication
     const apiKey = req.headers["x-api-key"];
-    if (apiKey !== process.env.ADMIN_API_KEY) {
+    if (!process.env.ADMIN_API_KEY || apiKey !== process.env.ADMIN_API_KEY) {
       return res.status(401).json({ error: "Unauthorized" });
     }
     

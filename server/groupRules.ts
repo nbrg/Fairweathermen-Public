@@ -1,60 +1,24 @@
 import { db } from "./db";
-import {
-  groupRuleChanges,
-  groups,
-  users,
-  lawroRulesAt,
-  resolveGroupRules,
-  type GroupRules,
-  type RuleChangeItem,
-} from "@shared/schema";
+import { groupRuleChanges, groups, users, lawroRulesAt, resolveGroupRules, type GroupRules, type RuleChangeItem } from "@shared/schema";
 import { and, asc, desc, eq, gt, inArray } from "drizzle-orm";
 
-type GroupRow = typeof groups.$inferSelect;
-
-// Bridge the legacy per-column rules (buyIn, lmsAllOutRule — still written by
-// the admin "Groups" screen) into the richer rules blob before resolving. A
-// value set in the `rules` blob (via the owner settings page) wins; otherwise
-// the legacy column supplies it. This keeps groups configured either way
-// behaving correctly, and lets getGroupRules be the single source every caller
-// reads.
-export function resolveGroupRulesForGroup(
-  group: Pick<GroupRow, "rules" | "buyIn" | "lmsAllOutRule"> | null | undefined,
-): GroupRules {
-  if (!group) return resolveGroupRules(null);
-  const stored = (group.rules ?? {}) as Partial<GroupRules>;
-  const bridged: Partial<GroupRules> = {
-    ...stored,
-    lms: {
-      ...stored.lms,
-      buyIn: stored.lms?.buyIn ?? group.buyIn,
-      allOutPolicy:
-        stored.lms?.allOutPolicy ?? (group.lmsAllOutRule as GroupRules["lms"]["allOutPolicy"]),
-    } as GroupRules["lms"],
-  };
-  return resolveGroupRules(bridged);
-}
-
-// The resolved (defaults-merged, column-bridged) rules for a group. Falls back
-// to the built-in defaults when no group id is given, so every caller gets a
-// complete GroupRules and groups without overrides behave exactly as the app
-// always has. Shared by the routes, the LMS processors and the Lawro scoring so
-// there's one place the rules come from.
+// The resolved (defaults-merged) rules for a group. Falls back to the built-in
+// defaults when no group id is given or the group has no overrides, so every
+// caller gets a complete GroupRules and groups without overrides behave exactly
+// as the app always has. Shared by the routes, the LMS processors and the
+// Lawro scoring so there's one place the rules come from.
 export async function getGroupRules(groupId?: number | null): Promise<GroupRules> {
   if (groupId == null) return resolveGroupRules(null);
-  const [group] = await db
-    .select({ rules: groups.rules, buyIn: groups.buyIn, lmsAllOutRule: groups.lmsAllOutRule })
-    .from(groups)
-    .where(eq(groups.id, groupId));
-  return resolveGroupRulesForGroup(group);
+  const [group] = await db.select({ rules: groups.rules }).from(groups).where(eq(groups.id, groupId));
+  return resolveGroupRules(group?.rules);
 }
 
 export type LawroRulesFor = (season: string | null | undefined, gameweek: number | null | undefined) => GroupRules["lawro"];
 
 // A lookup for the Lawro rules in force for any gameweek of a group. Admin
 // edits only apply from the first gameweek whose deadline hadn't passed when
-// they were made (see lawroRulesAt), so scoring must ask per gameweek rather
-// than reading the group's current rules.
+// they were made (see lawroRulesAt), so scoring, deadlines and late entry must
+// ask per gameweek rather than reading the group's current rules.
 export async function getLawroRulesResolver(groupId?: number | null): Promise<LawroRulesFor> {
   const current = (await getGroupRules(groupId)).lawro;
   if (groupId == null) return () => current;
@@ -75,16 +39,17 @@ export async function getLawroRulesResolver(groupId?: number | null): Promise<La
 const LAWRO_MISSED_LABELS: Record<string, string> = {
   blank: "Score nothing that week",
   random: "Fill a random scoreline",
+  open_until_kickoff: "Can still predict matches that haven't kicked off",
 };
 const LMS_MISSED_LABELS: Record<string, string> = {
   random: "Assign a random team",
-  eliminate: "Knock them out",
+  eliminate: "Knocked out (costs a life)",
 };
 const LMS_ALL_OUT_LABELS: Record<string, string> = {
-  rollover: "No winner; the pot rolls into a new competition",
-  revive: "Revive everyone; carry on the same competition",
-  co_winners: "They share the win",
-  no_winner: "No winner; competition just ends",
+  rollover: "Everyone's back in; the pot rolls over",
+  co_winners: "The players who went out last split the pot",
+  // Removed option, kept so older rule-change logs still read nicely.
+  no_winner: "No winner; the pot doesn't carry over",
 };
 
 function minutesLabel(m: number): string {
@@ -126,8 +91,8 @@ export async function unseenRuleChanges(groupId: number, userId: number, lastSee
     .where(and(eq(groupRuleChanges.groupId, groupId), gt(groupRuleChanges.id, lastSeenId)))
     .orderBy(asc(groupRuleChanges.id));
   const unseen = rows.filter((r) => r.changedByUserId !== userId);
-  // Name whoever made each change, so the pop-up can say "Alex has changed the
-  // rules" rather than an anonymous "the admin".
+  // Name whoever made each change, so the pop-up can say "Alex has changed
+  // the rules" rather than an anonymous "the admin".
   const changerIds = Array.from(new Set(unseen.map((r) => r.changedByUserId).filter((id): id is number => id != null)));
   const changers = changerIds.length
     ? await db.select({ id: users.id, username: users.username }).from(users).where(inArray(users.id, changerIds))
@@ -152,4 +117,17 @@ export async function latestRuleChangeId(groupId: number): Promise<number> {
     .orderBy(desc(groupRuleChanges.id))
     .limit(1);
   return row?.id ?? 0;
+}
+
+// The buy-in to record on a group's new LMS competition. Groups with an admin
+// (self-service ones, plus original groups given an admin) take it from their
+// rules; the remaining original groups return null so the LMS page keeps using
+// its legacy per-season stakes for them.
+export async function stakeForNewCompetition(groupId: number): Promise<number | null> {
+  const [group] = await db
+    .select({ ownerUserId: groups.ownerUserId, rules: groups.rules })
+    .from(groups)
+    .where(eq(groups.id, groupId));
+  if (!group || group.ownerUserId == null) return null;
+  return resolveGroupRules(group.rules).lms.buyIn;
 }

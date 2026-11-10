@@ -2,7 +2,7 @@ import { db } from "./db";
 import { eq } from "drizzle-orm";
 import { groups, users, type Match } from "@shared/schema";
 import { storage } from "./storage";
-import { getGroupRules } from "./groupRules";
+import { getLawroRulesResolver } from "./groupRules";
 import { londonStringToUtcMs } from "@shared/time";
 
 // Pick a plausible random scoreline for an auto-filled Lawro prediction. Low
@@ -43,8 +43,8 @@ export async function fillMissedLawroPicks(): Promise<void> {
     const eligible: typeof allGroups = [];
     for (const g of allGroups) {
       if (!((g.enabledGames as string[]) ?? []).includes("predictions")) continue;
-      const rules = await getGroupRules(g.id);
-      if (rules.lawro.missedPickPolicy === "random") eligible.push(g);
+      // Whether the rule is "random" is checked per locked gameweek below.
+      eligible.push(g);
     }
     if (eligible.length === 0) return;
 
@@ -52,19 +52,23 @@ export async function fillMissedLawroPicks(): Promise<void> {
     const matches = await storage.getAllMatches();
     if (matches.length === 0) return;
     const kickoffs = earliestKickoffByGameweek(matches);
+    const season = matches.find((m) => m.season)?.season ?? null;
     const now = Date.now();
 
     for (const group of eligible) {
-      const rules = await getGroupRules(group.id);
-      const offsetMs = rules.lawro.deadlineMinutesBeforeKickoff * 60 * 1000;
+      // Rules are per gameweek: an admin's edit only applies from the next
+      // open gameweek, so each gameweek's deadline and policy are its own.
+      const lawroRulesFor = await getLawroRulesResolver(group.id);
 
       // The most-recently-locked gameweek: the highest gameweek whose deadline
       // (first kickoff minus the offset) has passed.
       let targetGw: number | null = null;
       for (const [gw, ko] of Array.from(kickoffs.entries())) {
+        const offsetMs = lawroRulesFor(season, gw).deadlineMinutesBeforeKickoff * 60 * 1000;
         if (now >= ko - offsetMs && (targetGw == null || gw > targetGw)) targetGw = gw;
       }
       if (targetGw == null) continue;
+      if (lawroRulesFor(season, targetGw).missedPickPolicy !== "random") continue;
 
       const gwMatches = matches.filter((m) => m.gameweek === targetGw);
       if (gwMatches.length === 0) continue;

@@ -31,14 +31,14 @@ test.describe("group admin player tools", () => {
   test("a player can sit out the next LMS competition and be added back", async ({ request, playwright, baseURL }) => {
     const created = await createGroup(request);
     const joiner = await playwright.request.newContext({ baseURL });
-    await joiner.post(`/api/group/join/${created.inviteToken}`, { data: { name: "Sam" } });
+    await joiner.post(`/api/group/join/${created.inviteToken}`, { data: { name: "Morgan" } });
     await joiner.dispose();
 
     // The group's first LMS competition auto-starts at the next gameweek that
     // hasn't kicked off, so it's open and everyone's in it.
     const list = await (await request.get("/api/group/players")).json();
     expect(list.lms?.open).toBe(true);
-    const samRow = list.players.find((p: any) => p.username === "Sam");
+    const samRow = list.players.find((p: any) => p.username === "Morgan");
     expect(samRow.inLms).toBe(true);
 
     expect((await request.put(`/api/group/players/${samRow.id}/lms`, { data: { inLms: false } })).ok()).toBeTruthy();
@@ -53,11 +53,11 @@ test.describe("group admin player tools", () => {
   test("resetting a code retires the old one", async ({ request, playwright, baseURL }) => {
     const created = await createGroup(request);
     const joiner = await playwright.request.newContext({ baseURL });
-    const oldCode = (await (await joiner.post(`/api/group/join/${created.inviteToken}`, { data: { name: "Sam" } })).json()).code;
+    const oldCode = (await (await joiner.post(`/api/group/join/${created.inviteToken}`, { data: { name: "Morgan" } })).json()).code;
     await joiner.dispose();
 
     const list = await (await request.get("/api/group/players")).json();
-    const samRow = list.players.find((p: any) => p.username === "Sam");
+    const samRow = list.players.find((p: any) => p.username === "Morgan");
     const reset = await request.post(`/api/group/players/${samRow.id}/reset-code`);
     expect(reset.ok()).toBeTruthy();
     const { code } = await reset.json();

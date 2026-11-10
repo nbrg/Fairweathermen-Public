@@ -139,7 +139,7 @@ async function main() {
   );
   console.log(`   FOOTBALL_DATA_API_KEY set: ${!!process.env.FOOTBALL_DATA_API_KEY} (needed for scores, not for the randomiser)`);
 
-  // 5. Participants ---------------------------------------------------------
+  // 5. Taylor / participants ------------------------------------------------
   line();
   console.log("[5] PARTICIPANTS & SELECTIONS for currentGW");
   if (comp) {

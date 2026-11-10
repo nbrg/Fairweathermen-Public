@@ -56,7 +56,7 @@ function TeamButton({
           ? "border-primary bg-primary text-white shadow-sm shadow-primary/30"
           : isUsed
             ? "border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed"
-            : "border-gray-200 bg-white text-gray-900 hover:-translate-y-0.5 hover:border-primary hover:shadow-md active:translate-y-0 disabled:opacity-50"
+            : "border-gray-200 bg-card text-gray-900 hover:-translate-y-0.5 hover:border-primary hover:shadow-md active:translate-y-0 disabled:opacity-50"
       }`}
     >
       {isCurrent && (
@@ -162,7 +162,7 @@ export function TeamPickerDialog({
             sorted.map((m) => (
               <div
                 key={m.id}
-                className="rounded-2xl border border-gray-200 bg-white p-2.5 shadow-sm"
+                className="rounded-2xl border border-gray-200 bg-card p-2.5 shadow-sm"
               >
                 <div className="mb-1.5 text-center text-[11px] font-semibold uppercase tracking-wide text-gray-400">
                   {formatKickoff(m.matchTime)}

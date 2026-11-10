@@ -92,7 +92,7 @@ test.describe("Joker in the app", () => {
     // navigation (no reload) and the page must already see the new rule.
     await page.goto("/lawro");
     await expect(page.getByText("Your Joker", { exact: true })).toHaveCount(0);
-    await page.getByRole("link", { name: "Group settings" }).click();
+    await page.getByRole("link", { name: "Settings" }).first().click();
     await page.getByRole("switch", { name: "Joker" }).click();
     await page.getByRole("button", { name: "Save rules" }).click();
     await expect(page.getByText("Rules saved").first()).toBeVisible();

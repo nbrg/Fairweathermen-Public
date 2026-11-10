@@ -163,7 +163,7 @@ export default function CreateGroup() {
                 id="adminName"
                 value={adminName}
                 onChange={(e) => setAdminName(e.target.value)}
-                placeholder="e.g. Alex"
+                placeholder="e.g. Frank"
                 maxLength={40}
                 disabled={submitting}
               />

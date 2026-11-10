@@ -149,7 +149,8 @@ export async function unifyLoginCodesAcrossGroups(): Promise<void> {
     const { users, groups } = await import("@shared/schema");
     const { eq, isNull, inArray } = await import("drizzle-orm");
 
-    const kprGroup = (await db.select({ id: groups.id }).from(groups).where(eq(groups.slug, "city")))[0];
+    const { isCityGroup } = await import("@shared/originalGroups");
+    const kprGroup = (await db.select({ id: groups.id, slug: groups.slug }).from(groups)).find(isCityGroup);
     const kprGroupId = kprGroup?.id ?? null;
 
     // Original groups only: in self-service groups two rows with the same name

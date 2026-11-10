@@ -30,14 +30,14 @@ export function GroupMultiSelect({
 
   return (
     <details className="relative">
-      <summary className="flex cursor-pointer list-none items-center gap-1 rounded-md border bg-white px-3 py-2 text-sm text-gray-800">
+      <summary className="flex cursor-pointer list-none items-center gap-1 rounded-md border bg-card px-3 py-2 text-sm text-gray-800">
         {label}
         <ChevronDown className="h-4 w-4 text-gray-400" />
       </summary>
       {/* Anchor to the same side the control sits on: left on mobile (where it
           wraps under the heading), right on wider screens. Clamp to the
           viewport so it never opens off-screen. */}
-      <div className="absolute left-0 z-30 mt-1 w-56 max-w-[calc(100vw-2rem)] rounded-md border bg-white p-2 shadow-lg sm:left-auto sm:right-0">
+      <div className="absolute left-0 z-30 mt-1 w-56 max-w-[calc(100vw-2rem)] rounded-md border bg-card p-2 shadow-lg sm:left-auto sm:right-0">
         <div className="mb-1 flex gap-2 border-b pb-1 text-xs">
           <button
             type="button"
