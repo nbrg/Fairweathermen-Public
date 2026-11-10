@@ -256,7 +256,8 @@ test.describe("rule-change acknowledgement audit", () => {
       // acknowledgement must not become an "Other: 1 pick" chip.
       await page.goto("/admin/activity");
       await page.getByPlaceholder("Filter by player…").fill("Reader");
-      await expect(page.getByTestId("activity-pick-count")).toHaveCount(0);
+      // toHaveText([]) rather than toHaveCount(0): a failure then names the chip.
+      await expect(page.getByTestId("activity-pick-count")).toHaveText([]);
     });
   }
 
